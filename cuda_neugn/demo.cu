@@ -32,6 +32,9 @@
 namespace {
 struct DemoArgs {
     std::string export_dir = "./cuda_export/wikics";
+    std::string config_path = "./method/model_params/wikics";
+    std::string graph_path = "./datasets/wikics";
+    std::string dataset = "wikics";
     std::string graph_bin = "";
     std::string query_bin = "";
     std::string output = "./demo_cu_results.csv";
@@ -95,6 +98,9 @@ DemoArgs parse_args(int argc, char** argv) {
             return std::string(argv[++i]);
         };
         if (a == "--export_dir") args.export_dir = next(a);
+        else if (a == "--config_path") args.config_path = next(a);
+        else if (a == "--graph_path") args.graph_path = next(a);
+        else if (a == "--dataset") args.dataset = next(a);
         else if (a == "--graph_bin") args.graph_bin = next(a);
         else if (a == "--query_bin") args.query_bin = next(a);
         else if (a == "--output") args.output = next(a);
@@ -111,7 +117,6 @@ DemoArgs parse_args(int argc, char** argv) {
         else throw std::runtime_error("Unknown argument: " + a);
     }
     if (args.graph_bin.empty()) args.graph_bin = args.export_dir + "/demo_input/data_edges_i32.bin";
-    if (args.query_bin.empty()) args.query_bin = args.export_dir + "/demo_input/queries.bin";
     return args;
 }
 
@@ -284,6 +289,57 @@ std::vector<int> build_path_fallback(const Query& q, const std::vector<std::unor
     return nodes;
 }
 
+Query sample_connected_query(
+    int qid,
+    int query_size,
+    const std::vector<std::unordered_set<int>>& data_adj,
+    const std::vector<int>& data_labels,
+    std::mt19937& rng
+) {
+    int n = static_cast<int>(data_adj.size());
+    if (query_size > n) throw std::runtime_error("query_size > data nodes");
+    std::uniform_int_distribution<int> uni(0, n - 1);
+    for (int t = 0; t < 300; ++t) {
+        int start = uni(rng);
+        std::vector<int> frontier = {start};
+        std::unordered_set<int> selected = {start};
+        while (!frontier.empty() && static_cast<int>(selected.size()) < query_size) {
+            int u = frontier.front();
+            frontier.erase(frontier.begin());
+            std::vector<int> nbrs(data_adj[u].begin(), data_adj[u].end());
+            std::shuffle(nbrs.begin(), nbrs.end(), rng);
+            for (int v : nbrs) {
+                if (!selected.count(v)) {
+                    selected.insert(v);
+                    frontier.push_back(v);
+                    if (static_cast<int>(selected.size()) >= query_size) break;
+                }
+            }
+        }
+        if (static_cast<int>(selected.size()) < query_size) continue;
+        std::vector<int> orig(selected.begin(), selected.end());
+        std::sort(orig.begin(), orig.end());
+        std::unordered_map<int, int> map;
+        for (int i = 0; i < query_size; ++i) map[orig[i]] = i;
+        Query q;
+        q.query_id = qid;
+        q.n = query_size;
+        q.orig_nodes = orig;
+        q.labels.resize(query_size);
+        for (int i = 0; i < query_size; ++i) q.labels[i] = data_labels[orig[i]];
+        for (int u : orig) {
+            for (int v : data_adj[u]) {
+                if (selected.count(v)) {
+                    q.edge_src.push_back(map[u]);
+                    q.edge_dst.push_back(map[v]);
+                }
+            }
+        }
+        return q;
+    }
+    throw std::runtime_error("Failed to sample connected query");
+}
+
 std::vector<int> order_with_neugn(
     const DemoArgs& args,
     const Query& q,
@@ -424,20 +480,25 @@ int main(int argc, char** argv) {
         auto manifest = parse_manifest_tsv(args.export_dir + "/manifest.tsv");
         (void)manifest;
 
-        std::ifstream nnf(args.export_dir + "/demo_input/data_num_nodes.txt");
-        if (!nnf) throw std::runtime_error("Missing data_num_nodes.txt");
         int num_nodes = 0;
-        nnf >> num_nodes;
-        auto edges_flat = read_i32_bin(args.graph_bin);
-        auto labels = read_i32_bin(args.export_dir + "/demo_input/data_labels_i32.bin");
-        if (edges_flat.size() % 2 != 0) throw std::runtime_error("Invalid data_edges_i32.bin");
-        int e = static_cast<int>(edges_flat.size() / 2);
-        std::vector<int> data_src(edges_flat.begin(), edges_flat.begin() + e);
-        std::vector<int> data_dst(edges_flat.begin() + e, edges_flat.end());
+        std::vector<int> data_src, data_dst, labels;
+        load_data_graph_from_text(args, num_nodes, data_src, data_dst, labels);
         auto d_adj = build_adj(num_nodes, data_src, data_dst);
 
-        auto tok = load_tokenizer_meta(args.export_dir + "/demo_input/tokenizer_meta.txt");
-        auto queries = load_queries_bin(args.query_bin);
+        TokenizerMeta tok;
+        tok.padding_id = num_nodes;
+        tok.sos_id = num_nodes + 1;
+        tok.sub_node_id_size = std::stoi(cfg.at("sub_node_id_size"));
+
+        std::vector<Query> queries;
+        if (!args.query_bin.empty()) {
+            queries = load_queries_bin(args.query_bin);
+        } else {
+            std::mt19937 rng(args.seed);
+            for (int i = 0; i < args.num_queries; ++i) {
+                queries.push_back(sample_connected_query(i, args.query_size, d_adj, labels, rng));
+            }
+        }
         auto path_map = load_query_paths_bin(args.export_dir + "/demo_input/query_paths.bin");
         if (queries.size() > static_cast<size_t>(args.num_queries)) queries.resize(args.num_queries);
 
@@ -490,5 +551,68 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         std::cerr << "[demo_cu][error] " << e.what() << std::endl;
         return 1;
+    }
+}
+std::unordered_map<int, int> load_value2id_csv(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("Failed to open mapping csv: " + path);
+    std::unordered_map<int, int> m;
+    std::string line;
+    std::getline(in, line);  // header
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string col0, col1;
+        if (!std::getline(ss, col0, ',')) continue;
+        if (!std::getline(ss, col1, ',')) continue;
+        m[std::stoi(col0)] = std::stoi(col1);
+    }
+    return m;
+}
+
+void load_data_graph_from_text(
+    const DemoArgs& args,
+    int& num_nodes,
+    std::vector<int>& data_src,
+    std::vector<int>& data_dst,
+    std::vector<int>& data_labels
+) {
+    std::string graph_file = args.graph_path + "/" + args.dataset + ".graph";
+    std::ifstream in(graph_file);
+    if (!in) throw std::runtime_error("Failed to open data graph: " + graph_file);
+
+    auto value2id = load_value2id_csv(args.config_path + "/" + args.dataset + "_value2id_mapping.csv");
+
+    std::string line;
+    if (!std::getline(in, line)) throw std::runtime_error("Empty graph file: " + graph_file);
+    {
+        std::stringstream ss(line);
+        std::string tag;
+        int edge_cnt = 0;
+        ss >> tag >> num_nodes >> edge_cnt;
+        if (tag != "t") throw std::runtime_error("Invalid graph header in " + graph_file);
+        (void)edge_cnt;
+    }
+    data_labels.assign(num_nodes, 0);
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string tag;
+        ss >> tag;
+        if (tag == "v") {
+            int nid = 0, val = 0, aux = 0;
+            ss >> nid >> val >> aux;
+            auto it = value2id.find(val);
+            if (it == value2id.end()) throw std::runtime_error("Value not found in value2id mapping: " + std::to_string(val));
+            if (nid < 0 || nid >= num_nodes) throw std::runtime_error("Invalid node id in graph file");
+            data_labels[nid] = it->second;
+        } else if (tag == "e") {
+            int s = 0, d = 0, aux = 0;
+            ss >> s >> d >> aux;
+            data_src.push_back(s);
+            data_dst.push_back(d);
+            data_src.push_back(d);
+            data_dst.push_back(s);
+        }
     }
 }
