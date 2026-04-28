@@ -275,7 +275,36 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
     require_2d_shape(manifest_, "decoder.tok_embeddings.weight", manifest_.at("decoder.tok_embeddings.weight").shape.at(0), dim_);
     require_2d_shape(manifest_, "decoder.node_embeddings.ne", manifest_.at("decoder.node_embeddings.ne").shape.at(0), dim_);
     require_2d_shape(manifest_, "decoder.type_embeddings.weight", manifest_.at("decoder.type_embeddings.weight").shape.at(0), dim_);
-    require_2d_shape(manifest_, "decoder.pos_embeddings.pe", manifest_.at("decoder.pos_embeddings.pe").shape.at(0), dim_);
+    auto pos_it = manifest_.find("decoder.pos_embeddings.pe");
+    if (pos_it == manifest_.end()) throw std::runtime_error("Missing required weight in manifest: decoder.pos_embeddings.pe");
+    const auto& pos_shape = pos_it->second.shape;
+    int64_t pos_rows = -1;
+    int64_t pos_dim = -1;
+    if (pos_shape.size() == 2) {
+        pos_rows = pos_shape[0];
+        pos_dim = pos_shape[1];
+    } else if (pos_shape.size() == 3 && pos_shape[0] == 1) {
+        // PyTorch positional buffer is typically [1, max_len, dim].
+        pos_rows = pos_shape[1];
+        pos_dim = pos_shape[2];
+    } else {
+        throw std::runtime_error(
+            "Unsupported shape for decoder.pos_embeddings.pe, expected [max_len, dim] or [1, max_len, dim], got " +
+            shape_to_string(pos_shape)
+        );
+    }
+    if (pos_dim != dim_) {
+        throw std::runtime_error(
+            "Unsupported positional embedding dim for decoder.pos_embeddings.pe, expected dim=" +
+            std::to_string(dim_) + " got " + std::to_string(pos_dim)
+        );
+    }
+    if (pos_rows < 1 + token_len_) {
+        throw std::runtime_error(
+            "Positional embedding too short: need at least " + std::to_string(1 + token_len_) +
+            " rows, got " + std::to_string(pos_rows)
+        );
+    }
 
     // Infer kv projection width from the first layer and enforce consistency across layers.
     {
