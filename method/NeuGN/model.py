@@ -372,7 +372,7 @@ class GraphDecoder(nn.Module):
         elif self.decoder_type == 'mlp':
             self.decoder =  ResidualMLP(params)
         self.dim = params.decoder_config.dim
-        self.finger_num = params.gt_config.num_fingerprints
+        self.finger_num = getattr(getattr(params, "gt_config", {}), "num_fingerprints", 0)
         
     def get_encoder_tensor(self, batch_graphs, device):
         if self.encoder_type == 'gt':
