@@ -3,7 +3,6 @@
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
-from NeuGN.encoders.graphGT_encoder import GraphsGPTEncoder, GraphsGPTEncoderOutput
 from NeuGN.encoders.mpnn_encoder import GNN
 from NeuGN.encoders.nag_encoder import NAGEncoder
 import fairscale.nn.model_parallel.initialize as fs_init
@@ -363,6 +362,7 @@ class GraphDecoder(nn.Module):
         if self.encoder_type in self.gnn_list:
             self.encoder = GNN(params)
         elif self.encoder_type == 'gt':
+            from NeuGN.encoders.graphGT_encoder import GraphsGPTEncoder
             self.encoder = GraphsGPTEncoder(params)
         elif self.encoder_type == 'nagphormer':
             self.encoder = NAGEncoder(params.encoder_config)
@@ -397,7 +397,7 @@ class GraphDecoder(nn.Module):
 
     def forward(self, batch_graphs, tokens: torch.Tensor, subnode_ids: torch.Tensor, token_mask_len: torch.Tensor, start_pos: int, device):
         if self.encoder_type == 'gt':
-            encoder_output:GraphsGPTEncoderOutput = self.encoder(batch_graphs, device)
+            encoder_output = self.encoder(batch_graphs, device)
             graph_features = encoder_output.fingerprint_tokens
             # graph_features = encoder_output.inputs_embeds
         elif self.encoder_type in self.gnn_list:
