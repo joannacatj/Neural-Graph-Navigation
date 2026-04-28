@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -40,17 +41,47 @@ std::vector<float> load_weight_by_name(
 }
 
 void upload_to_device(const std::vector<float>& h, float** d) {
-    cudaError_t err = cudaMalloc(reinterpret_cast<void**>(d), h.size() * sizeof(float));
-    if (err != cudaSuccess) throw std::runtime_error("cudaMalloc failed");
-    err = cudaMemcpy(*d, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy H2D failed");
+    const size_t nbytes = h.size() * sizeof(float);
+    if (nbytes == 0) {
+        *d = nullptr;
+        return;
+    }
+    cudaError_t err = cudaMalloc(reinterpret_cast<void**>(d), nbytes);
+    if (err != cudaSuccess) {
+        size_t free_b = 0, total_b = 0;
+        cudaMemGetInfo(&free_b, &total_b);
+        throw std::runtime_error(
+            "cudaMalloc failed for float upload (" + std::to_string(nbytes) + " bytes): " +
+            std::string(cudaGetErrorString(err)) +
+            ", free=" + std::to_string(free_b) + ", total=" + std::to_string(total_b)
+        );
+    }
+    err = cudaMemcpy(*d, h.data(), nbytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        throw std::runtime_error("cudaMemcpy H2D failed for float upload: " + std::string(cudaGetErrorString(err)));
+    }
 }
 
 void upload_to_device_i64(const std::vector<int64_t>& h, int64_t** d) {
-    cudaError_t err = cudaMalloc(reinterpret_cast<void**>(d), h.size() * sizeof(int64_t));
-    if (err != cudaSuccess) throw std::runtime_error("cudaMalloc failed i64");
-    err = cudaMemcpy(*d, h.data(), h.size() * sizeof(int64_t), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy H2D failed i64");
+    const size_t nbytes = h.size() * sizeof(int64_t);
+    if (nbytes == 0) {
+        *d = nullptr;
+        return;
+    }
+    cudaError_t err = cudaMalloc(reinterpret_cast<void**>(d), nbytes);
+    if (err != cudaSuccess) {
+        size_t free_b = 0, total_b = 0;
+        cudaMemGetInfo(&free_b, &total_b);
+        throw std::runtime_error(
+            "cudaMalloc failed for int64 upload (" + std::to_string(nbytes) + " bytes): " +
+            std::string(cudaGetErrorString(err)) +
+            ", free=" + std::to_string(free_b) + ", total=" + std::to_string(total_b)
+        );
+    }
+    err = cudaMemcpy(*d, h.data(), nbytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        throw std::runtime_error("cudaMemcpy H2D failed for int64 upload: " + std::string(cudaGetErrorString(err)));
+    }
 }
 
 std::vector<int64_t> make_self_looped(const std::vector<int64_t>& edge, int num_nodes) {
@@ -58,6 +89,31 @@ std::vector<int64_t> make_self_looped(const std::vector<int64_t>& edge, int num_
     out.reserve(edge.size() + num_nodes);
     for (int i = 0; i < num_nodes; ++i) out.push_back(i);
     return out;
+}
+
+size_t checked_count_bytes(size_t count, size_t elem_size, const std::string& name) {
+    if (count == 0) return 0;
+    if (count > std::numeric_limits<size_t>::max() / elem_size) {
+        throw std::runtime_error("Allocation size overflow for " + name);
+    }
+    return count * elem_size;
+}
+
+void checked_cuda_malloc(void** ptr, size_t nbytes, const std::string& name) {
+    if (nbytes == 0) {
+        *ptr = nullptr;
+        return;
+    }
+    cudaError_t err = cudaMalloc(ptr, nbytes);
+    if (err != cudaSuccess) {
+        size_t free_b = 0, total_b = 0;
+        cudaMemGetInfo(&free_b, &total_b);
+        throw std::runtime_error(
+            "cudaMalloc failed for " + name + " (" + std::to_string(nbytes) + " bytes): " +
+            std::string(cudaGetErrorString(err)) +
+            ", free=" + std::to_string(free_b) + ", total=" + std::to_string(total_b)
+        );
+    }
 }
 }  // namespace
 
@@ -98,6 +154,10 @@ void NeuGNCudaModel::clear_cuda() {
 
 void NeuGNCudaModel::load(const std::string& export_dir) {
     clear_cuda();
+    cudaError_t init_err = cudaFree(0);
+    if (init_err != cudaSuccess) {
+        throw std::runtime_error("CUDA runtime initialization failed: " + std::string(cudaGetErrorString(init_err)));
+    }
     export_dir_ = export_dir;
     config_ = parse_config_txt(export_dir + "/config.txt");
     manifest_ = parse_manifest_tsv(export_dir + "/manifest.tsv");
@@ -158,28 +218,28 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
     upload_to_device_i64(tokens_h_, &d_tokens_);
     upload_to_device_i64(subnode_h_, &d_subnode_);
 
-    cudaMalloc(reinterpret_cast<void**>(&d_deg_), num_nodes_ * sizeof(int));
-    cudaMalloc(reinterpret_cast<void**>(&d_h_), num_nodes_ * dim_ * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_tmp_), num_nodes_ * dim_ * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_graph_), dim_ * sizeof(float));
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_deg_), checked_count_bytes(static_cast<size_t>(num_nodes_), sizeof(int), "d_deg_"), "d_deg_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_h_), checked_count_bytes(static_cast<size_t>(num_nodes_) * static_cast<size_t>(dim_), sizeof(float), "d_h_"), "d_h_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_tmp_), checked_count_bytes(static_cast<size_t>(num_nodes_) * static_cast<size_t>(dim_), sizeof(float), "d_tmp_"), "d_tmp_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_graph_), checked_count_bytes(static_cast<size_t>(dim_), sizeof(float), "d_graph_"), "d_graph_");
 
     int seq = 1 + token_len_;
-    cudaMalloc(reinterpret_cast<void**>(&d_masked_h_), seq * dim_ * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_q_), seq * dim_ * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_k_), seq * dim_ * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_v_), seq * dim_ * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_ctx_), seq * dim_ * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_scores_), n_heads_ * seq * seq * sizeof(float));
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_masked_h_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_masked_h_"), "d_masked_h_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_q_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_q_"), "d_q_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_k_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_k_"), "d_k_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_v_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_v_"), "d_v_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_ctx_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_ctx_"), "d_ctx_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_scores_), checked_count_bytes(static_cast<size_t>(n_heads_) * static_cast<size_t>(seq) * static_cast<size_t>(seq), sizeof(float), "d_scores_"), "d_scores_");
 
     // ffn dim from first layer w1
     auto w1_shape = manifest_.at("decoder.layers.0.feed_forward.w1.weight").shape;
     int ffn_dim = static_cast<int>(w1_shape[0]);
-    cudaMalloc(reinterpret_cast<void**>(&d_ffn1_), seq * ffn_dim * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_ffn3_), seq * ffn_dim * sizeof(float));
-    cudaMalloc(reinterpret_cast<void**>(&d_ffn_hidden_), seq * ffn_dim * sizeof(float));
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_ffn1_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(ffn_dim), sizeof(float), "d_ffn1_"), "d_ffn1_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_ffn3_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(ffn_dim), sizeof(float), "d_ffn3_"), "d_ffn3_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_ffn_hidden_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(ffn_dim), sizeof(float), "d_ffn_hidden_"), "d_ffn_hidden_");
 
     int vocab = cfg_int(config_, "output_dim");
-    cudaMalloc(reinterpret_cast<void**>(&d_logits_), vocab * sizeof(float));
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_logits_), checked_count_bytes(static_cast<size_t>(vocab), sizeof(float), "d_logits_"), "d_logits_");
 }
 
 void NeuGNCudaModel::forward_full_model() {
@@ -317,11 +377,11 @@ void NeuGNCudaModel::forward_full_model() {
     launch_linear_kernel(d_ffn1_, d_ow2, d_ob2, d_logits_, 1, hid, vocab);
 
     cudaError_t err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) throw std::runtime_error("CUDA forward failed");
+    if (err != cudaSuccess) throw std::runtime_error("CUDA forward failed: " + std::string(cudaGetErrorString(err)));
 
     output_host_.resize(vocab);
     err = cudaMemcpy(output_host_.data(), d_logits_, vocab * sizeof(float), cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy output failed");
+    if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy output failed: " + std::string(cudaGetErrorString(err)));
     output_shape_ = {1, 1, vocab};
 
     cudaFree(d_norm_w); cudaFree(d_ow0); cudaFree(d_ob0); cudaFree(d_ow2); cudaFree(d_ob2);
