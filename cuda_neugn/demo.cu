@@ -348,7 +348,9 @@ std::vector<int> order_with_neugn(
     const std::vector<int>& local_cands,
     const std::unordered_map<int, int>& mapping,
     const std::unordered_map<int, std::vector<int>>& path_map,
-    const TokenizerMeta& tok
+    const TokenizerMeta& tok,
+    int model_token_len,
+    int model_num_nodes
 ) {
     if (depth >= args.nav_depth || local_cands.empty()) return local_cands;
 
@@ -360,25 +362,47 @@ std::vector<int> order_with_neugn(
     std::unordered_map<int, int> node2sub;
     for (size_t i = 0; i < path_nodes.size(); ++i) node2sub[path_nodes[i]] = static_cast<int>(i % tok.sub_node_id_size);
 
-    std::vector<int64_t> tokens;
-    std::vector<int64_t> subnodes;
-    tokens.reserve(path_nodes.size() + 1);
-    subnodes.reserve(path_nodes.size() + 1);
-    tokens.push_back(tok.sos_id);
-    subnodes.push_back(node2sub.count(qnode) ? node2sub[qnode] : 0);
+    std::vector<int64_t> raw_tokens;
+    std::vector<int64_t> raw_subnodes;
+    raw_tokens.reserve(path_nodes.size() + 1);
+    raw_subnodes.reserve(path_nodes.size() + 1);
+    raw_tokens.push_back(tok.sos_id);
+    raw_subnodes.push_back(node2sub.count(qnode) ? node2sub[qnode] : 0);
     for (int pn : path_nodes) {
-        if (pn == qnode) tokens.push_back(tok.sos_id);
-        else if (mapping.count(pn)) tokens.push_back(mapping.at(pn));
-        else tokens.push_back(tok.padding_id);
-        subnodes.push_back(node2sub[pn]);
+        if (pn == qnode) raw_tokens.push_back(tok.sos_id);
+        else if (mapping.count(pn)) raw_tokens.push_back(mapping.at(pn));
+        else raw_tokens.push_back(tok.padding_id);
+        raw_subnodes.push_back(node2sub[pn]);
     }
-    std::vector<int64_t> token_len = {static_cast<int64_t>(tokens.size())};
 
+    if (model_token_len <= 0) throw std::runtime_error("Invalid token_len in config");
+    if (model_num_nodes <= 0) throw std::runtime_error("Invalid num_nodes in config");
+    int valid_token_len = std::min<int>(static_cast<int>(raw_tokens.size()), model_token_len);
+    std::vector<int64_t> tokens(model_token_len, tok.padding_id);
+    std::vector<int64_t> subnodes(model_token_len, 0);
+    std::copy(raw_tokens.begin(), raw_tokens.begin() + valid_token_len, tokens.begin());
+    std::copy(raw_subnodes.begin(), raw_subnodes.begin() + valid_token_len, subnodes.begin());
+    std::vector<int64_t> token_len = {static_cast<int64_t>(valid_token_len)};
+
+    std::vector<int64_t> q_edge_src_i64;
+    std::vector<int64_t> q_edge_dst_i64;
+    q_edge_src_i64.reserve(q.edge_src.size());
+    q_edge_dst_i64.reserve(q.edge_dst.size());
+    for (size_t i = 0; i < q.edge_src.size() && i < q.edge_dst.size(); ++i) {
+        int s = q.edge_src[i];
+        int d = q.edge_dst[i];
+        if (s < 0 || d < 0 || s >= model_num_nodes || d >= model_num_nodes) continue;
+        q_edge_src_i64.push_back(s);
+        q_edge_dst_i64.push_back(d);
+    }
     std::vector<int64_t> q_edge_i64;
-    q_edge_i64.reserve(2 * q.edge_src.size());
-    for (int v : q.edge_src) q_edge_i64.push_back(v);
-    for (int v : q.edge_dst) q_edge_i64.push_back(v);
-    std::vector<int64_t> q_labels_i64(q.labels.begin(), q.labels.end());
+    q_edge_i64.reserve(q_edge_src_i64.size() + q_edge_dst_i64.size());
+    q_edge_i64.insert(q_edge_i64.end(), q_edge_src_i64.begin(), q_edge_src_i64.end());
+    q_edge_i64.insert(q_edge_i64.end(), q_edge_dst_i64.begin(), q_edge_dst_i64.end());
+
+    std::vector<int64_t> q_labels_i64(model_num_nodes, 0);
+    int valid_nodes = std::min<int>(static_cast<int>(q.labels.size()), model_num_nodes);
+    for (int i = 0; i < valid_nodes; ++i) q_labels_i64[i] = q.labels[i];
 
     const std::string input_dir = args.export_dir + "/input";
     write_i64_bin(input_dir + "/graph_edge_index.bin", q_edge_i64);
@@ -470,6 +494,16 @@ void write_csv(const std::string& path, const std::vector<Row>& rows) {
 }
 }  // namespace
 
+
+std::unordered_map<int, int> load_value2id_csv(const std::string& path);
+void load_data_graph_from_text(
+    const DemoArgs& args,
+    int& num_nodes,
+    std::vector<int>& data_src,
+    std::vector<int>& data_dst,
+    std::vector<int>& data_labels
+);
+
 int main(int argc, char** argv) {
     try {
         DemoArgs args = parse_args(argc, argv);
@@ -489,6 +523,8 @@ int main(int argc, char** argv) {
         tok.padding_id = num_nodes;
         tok.sos_id = num_nodes + 1;
         tok.sub_node_id_size = std::stoi(cfg.at("sub_node_id_size"));
+        int model_token_len = std::stoi(cfg.at("token_len"));
+        int model_num_nodes = std::stoi(cfg.at("num_nodes"));
 
         std::vector<Query> queries;
         if (!args.query_bin.empty()) {
@@ -515,7 +551,7 @@ int main(int argc, char** argv) {
 
                 auto base_order = [&](int, int, const std::vector<int>& lc, const std::unordered_map<int, int>&) { return lc; };
                 auto neug_order = [&](int depth, int qnode, const std::vector<int>& lc, const std::unordered_map<int, int>& mapping) {
-                    return order_with_neugn(args, q, depth, qnode, lc, mapping, path_map, tok);
+                    return order_with_neugn(args, q, depth, qnode, lc, mapping, path_map, tok, model_token_len, model_num_nodes);
                 };
 
                 auto br = enumerate_first(q, q_order, q_adj, labels, d_adj, base_order, args.max_steps);
