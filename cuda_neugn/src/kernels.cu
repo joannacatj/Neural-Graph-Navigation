@@ -72,8 +72,7 @@ __global__ void gelu_kernel(float* x, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         float v = x[idx];
-        float c = 0.7978845608f * (v + 0.044715f * v * v * v);
-        x[idx] = 0.5f * v * (1.0f + tanhf(c));
+        x[idx] = 0.5f * v * (1.0f + erff(v * 0.7071067811865475f));
     }
 }
 
