@@ -115,6 +115,28 @@ void checked_cuda_malloc(void** ptr, size_t nbytes, const std::string& name) {
         );
     }
 }
+
+void check_index_bounds(const std::vector<int64_t>& ids, int64_t limit, const std::string& name) {
+    if (limit <= 0) {
+        throw std::runtime_error("Invalid bound for " + name + ": " + std::to_string(limit));
+    }
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] < 0 || ids[i] >= limit) {
+            throw std::runtime_error(
+                name + " out of range at index " + std::to_string(i) +
+                ": value=" + std::to_string(ids[i]) +
+                ", expected in [0, " + std::to_string(limit - 1) + "]"
+            );
+        }
+    }
+}
+
+void check_last_cuda_error(const std::string& where) {
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(where + ": " + std::string(cudaGetErrorString(err)));
+    }
+}
 }  // namespace
 
 void NeuGNCudaModel::require_weight(const std::string& name) const {
@@ -209,6 +231,17 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
         require_weight("decoder.layers." + std::to_string(i) + ".feed_forward.w3.weight");
     }
 
+    // Validate index tensors early to avoid opaque illegal-memory-access errors later in kernels.
+    const int64_t value_vocab = manifest_.at("encoder.value_embedding.weight").shape.at(0);
+    const int64_t token_vocab = manifest_.at("decoder.tok_embeddings.weight").shape.at(0);
+    const int64_t subnode_vocab = manifest_.at("decoder.node_embeddings.ne").shape.at(0);
+
+    check_index_bounds(feat_id_h_, value_vocab, "graph_feat_id");
+    check_index_bounds(tokens_h_, token_vocab, "tokens");
+    check_index_bounds(subnode_h_, subnode_vocab, "subnode_ids");
+    check_index_bounds(edge_src_h_, num_nodes_, "edge_src");
+    check_index_bounds(edge_dst_h_, num_nodes_, "edge_dst");
+
     output_shape_ = read_shape_file(export_dir + "/python_output.shape");
 
     // upload static inputs
@@ -252,6 +285,7 @@ void NeuGNCudaModel::forward_full_model() {
     float* d_val_emb = nullptr;
     upload_to_device(val_emb, &d_val_emb);
     launch_embedding_lookup_kernel(d_feat_id_, d_val_emb, d_h_, num_nodes_, dim_);
+    check_last_cuda_error("encoder.value_embedding lookup");
 
     for (int l = 0; l < cfg_int(config_, "encoder_layers"); ++l) {
         std::string prefix = "encoder.convs." + std::to_string(l) + ".linear.";
@@ -267,6 +301,7 @@ void NeuGNCudaModel::forward_full_model() {
         launch_gcn_aggregate_kernel(d_src_, d_dst_, d_deg_, d_h_, d_tmp_, e, dim_);
         launch_linear_kernel(d_tmp_, d_w, d_b, d_h_, num_nodes_, dim_, dim_);
         launch_relu_kernel(d_h_, num_nodes_ * dim_);
+        check_last_cuda_error("encoder.gcn layer " + std::to_string(l));
 
         cudaFree(d_w);
         cudaFree(d_b);
@@ -274,6 +309,7 @@ void NeuGNCudaModel::forward_full_model() {
     cudaFree(d_val_emb);
 
     launch_max_pool_kernel(d_h_, d_graph_, num_nodes_, dim_);
+    check_last_cuda_error("encoder.max_pool");
 
     // ----- Build decoder input h [seq, dim] -----
     auto tok_emb = load_weight_by_name(manifest_, export_dir_, "decoder.tok_embeddings.weight");
@@ -299,6 +335,7 @@ void NeuGNCudaModel::forward_full_model() {
 
     // + position embedding
     launch_add_inplace_kernel(d_masked_h_, d_pos, seq * dim_);
+    check_last_cuda_error("decoder.input embedding build");
 
     cudaFree(d_tok); cudaFree(d_node); cudaFree(d_type); cudaFree(d_pos);
 
@@ -341,6 +378,7 @@ void NeuGNCudaModel::forward_full_model() {
 
         launch_linear_kernel(d_ctx_, d_wo, nullptr, d_tmp_, seq, dim_, dim_);
         launch_add_inplace_kernel(d_masked_h_, d_tmp_, seq * dim_);
+        check_last_cuda_error("decoder.attention layer " + std::to_string(l));
 
         // FFN
         launch_rmsnorm_kernel(d_masked_h_, d_ffn_norm_w, d_tmp_, seq, dim_, norm_eps_);
@@ -352,15 +390,18 @@ void NeuGNCudaModel::forward_full_model() {
         launch_silu_mul_kernel(d_ffn_hidden_, d_ffn3_, seq * ffn_dim);
         launch_linear_kernel(d_ffn_hidden_, d_w2, nullptr, d_tmp_, seq, ffn_dim, dim_);
         launch_add_inplace_kernel(d_masked_h_, d_tmp_, seq * dim_);
+        check_last_cuda_error("decoder.ffn layer " + std::to_string(l));
 
         cudaFree(d_attn_norm_w); cudaFree(d_ffn_norm_w); cudaFree(d_wq); cudaFree(d_wk); cudaFree(d_wv); cudaFree(d_wo); cudaFree(d_w1); cudaFree(d_w2); cudaFree(d_w3);
     }
 
     // final norm
     launch_rmsnorm_kernel(d_masked_h_, d_norm_w, d_tmp_, seq, dim_, norm_eps_);
+    check_last_cuda_error("decoder.final_norm");
 
     // take row 1
     launch_copy_row_kernel(d_tmp_, d_graph_, 1, dim_);
+    check_last_cuda_error("decoder.select_row");
 
     // output mlp
     auto ow0 = load_weight_by_name(manifest_, export_dir_, "decoder.output.0.weight");
@@ -375,6 +416,7 @@ void NeuGNCudaModel::forward_full_model() {
     launch_linear_kernel(d_graph_, d_ow0, d_ob0, d_ffn1_, 1, dim_, hid);
     launch_gelu_kernel(d_ffn1_, hid);
     launch_linear_kernel(d_ffn1_, d_ow2, d_ob2, d_logits_, 1, hid, vocab);
+    check_last_cuda_error("decoder.output_mlp");
 
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) throw std::runtime_error("CUDA forward failed: " + std::string(cudaGetErrorString(err)));
