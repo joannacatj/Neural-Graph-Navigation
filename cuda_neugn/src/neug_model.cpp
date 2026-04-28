@@ -219,7 +219,15 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
     dim_ = cfg_int(config_, "decoder_dim");
     n_layers_ = cfg_int(config_, "n_layers");
     n_heads_ = cfg_int(config_, "n_heads");
+    if (n_heads_ <= 0 || dim_ % n_heads_ != 0) {
+        throw std::runtime_error(
+            "Invalid attention dims: decoder_dim=" + std::to_string(dim_) +
+            ", n_heads=" + std::to_string(n_heads_)
+        );
+    }
     head_dim_ = dim_ / n_heads_;
+    kv_heads_ = n_heads_;
+    kv_dim_ = dim_;
     norm_eps_ = cfg_float(config_, "norm_eps");
 
     auto edge_all = read_binary_int64(export_dir + "/input/graph_edge_index.bin");
@@ -258,18 +266,43 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
         require_weight("decoder.layers." + std::to_string(i) + ".feed_forward.w3.weight");
     }
 
-    // Current CUDA reference path assumes full-head attention projection sizes (q/k/v/o all [dim, dim]).
+    // Validate embedding dims.
     require_2d_shape(manifest_, "encoder.value_embedding.weight", manifest_.at("encoder.value_embedding.weight").shape.at(0), dim_);
     require_2d_shape(manifest_, "decoder.tok_embeddings.weight", manifest_.at("decoder.tok_embeddings.weight").shape.at(0), dim_);
     require_2d_shape(manifest_, "decoder.node_embeddings.ne", manifest_.at("decoder.node_embeddings.ne").shape.at(0), dim_);
     require_2d_shape(manifest_, "decoder.type_embeddings.weight", manifest_.at("decoder.type_embeddings.weight").shape.at(0), dim_);
     require_2d_shape(manifest_, "decoder.pos_embeddings.pe", manifest_.at("decoder.pos_embeddings.pe").shape.at(0), dim_);
 
+    // Infer kv projection width from the first layer and enforce consistency across layers.
+    {
+        const auto& wk0_shape = manifest_.at("decoder.layers.0.attention.wk.weight").shape;
+        if (wk0_shape.size() != 2 || wk0_shape[1] != dim_) {
+            throw std::runtime_error(
+                "Unsupported wk shape at layer 0, expected [kv_dim, " + std::to_string(dim_) +
+                "] got " + shape_to_string(wk0_shape)
+            );
+        }
+        kv_dim_ = static_cast<int>(wk0_shape[0]);
+        if (kv_dim_ <= 0 || kv_dim_ % head_dim_ != 0) {
+            throw std::runtime_error(
+                "Unsupported kv_dim=" + std::to_string(kv_dim_) +
+                ", must be positive and divisible by head_dim=" + std::to_string(head_dim_)
+            );
+        }
+        kv_heads_ = kv_dim_ / head_dim_;
+        if (n_heads_ % kv_heads_ != 0) {
+            throw std::runtime_error(
+                "Unsupported grouped attention: n_heads=" + std::to_string(n_heads_) +
+                " is not divisible by kv_heads=" + std::to_string(kv_heads_)
+            );
+        }
+    }
+
     for (int i = 0; i < n_layers_; ++i) {
         const std::string p = "decoder.layers." + std::to_string(i) + ".";
         require_2d_shape(manifest_, p + "attention.wq.weight", dim_, dim_);
-        require_2d_shape(manifest_, p + "attention.wk.weight", dim_, dim_);
-        require_2d_shape(manifest_, p + "attention.wv.weight", dim_, dim_);
+        require_2d_shape(manifest_, p + "attention.wk.weight", kv_dim_, dim_);
+        require_2d_shape(manifest_, p + "attention.wv.weight", kv_dim_, dim_);
         require_2d_shape(manifest_, p + "attention.wo.weight", dim_, dim_);
     }
 
@@ -301,8 +334,8 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
     int seq = 1 + token_len_;
     checked_cuda_malloc(reinterpret_cast<void**>(&d_masked_h_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_masked_h_"), "d_masked_h_");
     checked_cuda_malloc(reinterpret_cast<void**>(&d_q_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_q_"), "d_q_");
-    checked_cuda_malloc(reinterpret_cast<void**>(&d_k_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_k_"), "d_k_");
-    checked_cuda_malloc(reinterpret_cast<void**>(&d_v_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_v_"), "d_v_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_k_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(kv_dim_), sizeof(float), "d_k_"), "d_k_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_v_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(kv_dim_), sizeof(float), "d_v_"), "d_v_");
     checked_cuda_malloc(reinterpret_cast<void**>(&d_ctx_), checked_count_bytes(static_cast<size_t>(seq) * static_cast<size_t>(dim_), sizeof(float), "d_ctx_"), "d_ctx_");
     checked_cuda_malloc(reinterpret_cast<void**>(&d_scores_), checked_count_bytes(static_cast<size_t>(n_heads_) * static_cast<size_t>(seq) * static_cast<size_t>(seq), sizeof(float), "d_scores_"), "d_scores_");
 
@@ -410,13 +443,13 @@ void NeuGNCudaModel::forward_full_model() {
         launch_rmsnorm_kernel(d_masked_h_, d_attn_norm_w, d_tmp_, seq, dim_, norm_eps_);
 
         launch_linear_kernel(d_tmp_, d_wq, nullptr, d_q_, seq, dim_, dim_);
-        launch_linear_kernel(d_tmp_, d_wk, nullptr, d_k_, seq, dim_, dim_);
-        launch_linear_kernel(d_tmp_, d_wv, nullptr, d_v_, seq, dim_, dim_);
+        launch_linear_kernel(d_tmp_, d_wk, nullptr, d_k_, seq, dim_, kv_dim_);
+        launch_linear_kernel(d_tmp_, d_wv, nullptr, d_v_, seq, dim_, kv_dim_);
 
-        launch_attention_scores_kernel(d_q_, d_k_, d_scores_, seq, n_heads_, head_dim_);
+        launch_attention_scores_kernel(d_q_, d_k_, d_scores_, seq, n_heads_, kv_heads_, head_dim_);
         launch_attention_mask_row_kernel(d_scores_, seq, n_heads_, valid_rows);
         launch_softmax_rows_kernel(d_scores_, n_heads_ * seq, seq);
-        launch_attention_weighted_sum_kernel(d_scores_, d_v_, d_ctx_, seq, n_heads_, head_dim_);
+        launch_attention_weighted_sum_kernel(d_scores_, d_v_, d_ctx_, seq, n_heads_, kv_heads_, head_dim_);
 
         launch_linear_kernel(d_ctx_, d_wo, nullptr, d_tmp_, seq, dim_, dim_);
         launch_add_inplace_kernel(d_masked_h_, d_tmp_, seq * dim_);

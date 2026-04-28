@@ -134,17 +134,18 @@ __global__ void max_pool_kernel(const float* x, float* out, int rows, int dim) {
     }
 }
 
-__global__ void attention_scores_kernel(const float* q, const float* k, float* scores, int seq, int heads, int head_dim) {
+__global__ void attention_scores_kernel(const float* q, const float* k, float* scores, int seq, int q_heads, int kv_heads, int head_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = heads * seq * seq;
+    int total = q_heads * seq * seq;
     if (idx < total) {
         int j = idx % seq;
         int i = (idx / seq) % seq;
         int h = idx / (seq * seq);
+        int hk = h % kv_heads;
         float acc = 0.0f;
         for (int d = 0; d < head_dim; ++d) {
-            int qidx = i * (heads * head_dim) + h * head_dim + d;
-            int kidx = j * (heads * head_dim) + h * head_dim + d;
+            int qidx = i * (q_heads * head_dim) + h * head_dim + d;
+            int kidx = j * (kv_heads * head_dim) + hk * head_dim + d;
             acc += q[qidx] * k[kidx];
         }
         acc /= sqrtf((float)head_dim);
@@ -182,22 +183,23 @@ __global__ void softmax_rows_kernel(float* scores, int rows, int cols) {
     }
 }
 
-__global__ void attention_weighted_sum_kernel(const float* scores, const float* v, float* context, int seq, int heads, int head_dim) {
+__global__ void attention_weighted_sum_kernel(const float* scores, const float* v, float* context, int seq, int q_heads, int kv_heads, int head_dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = seq * heads * head_dim;
+    int total = seq * q_heads * head_dim;
     if (idx < total) {
         int d = idx % head_dim;
-        int h = (idx / head_dim) % heads;
-        int i = idx / (head_dim * heads);
+        int h = (idx / head_dim) % q_heads;
+        int i = idx / (head_dim * q_heads);
+        int hk = h % kv_heads;
 
         float acc = 0.0f;
         int row = h * seq + i;
         for (int j = 0; j < seq; ++j) {
             float p = scores[row * seq + j];
-            int vidx = j * (heads * head_dim) + h * head_dim + d;
+            int vidx = j * (kv_heads * head_dim) + hk * head_dim + d;
             acc += p * v[vidx];
         }
-        context[i * (heads * head_dim) + h * head_dim + d] = acc;
+        context[i * (q_heads * head_dim) + h * head_dim + d] = acc;
     }
 }
 
@@ -220,7 +222,7 @@ void launch_rmsnorm_kernel(const float* x, const float* w, float* y, int rows, i
 void launch_degree_kernel(const int64_t* dst, int* deg, int e, cudaStream_t stream) { degree_kernel<<<ceil_div(e,256),256,0,stream>>>(dst,deg,e);} 
 void launch_gcn_aggregate_kernel(const int64_t* src, const int64_t* dst, const int* deg, const float* x, float* out, int e, int dim, cudaStream_t stream) { gcn_aggregate_kernel<<<e,dim,0,stream>>>(src,dst,deg,x,out,e,dim);} 
 void launch_max_pool_kernel(const float* x, float* out, int rows, int dim, cudaStream_t stream) { max_pool_kernel<<<ceil_div(dim,256),256,0,stream>>>(x,out,rows,dim);} 
-void launch_attention_scores_kernel(const float* q, const float* k, float* scores, int seq, int heads, int head_dim, cudaStream_t stream) { attention_scores_kernel<<<ceil_div(heads*seq*seq,256),256,0,stream>>>(q,k,scores,seq,heads,head_dim);} 
+void launch_attention_scores_kernel(const float* q, const float* k, float* scores, int seq, int q_heads, int kv_heads, int head_dim, cudaStream_t stream) { attention_scores_kernel<<<ceil_div(q_heads*seq*seq,256),256,0,stream>>>(q,k,scores,seq,q_heads,kv_heads,head_dim);} 
 void launch_attention_mask_row_kernel(float* scores, int seq, int heads, int valid_rows, cudaStream_t stream) { attention_mask_row_kernel<<<ceil_div(heads*seq*seq,256),256,0,stream>>>(scores,seq,heads,valid_rows);} 
 void launch_softmax_rows_kernel(float* scores, int rows, int cols, cudaStream_t stream) { softmax_rows_kernel<<<rows,1,0,stream>>>(scores,rows,cols);} 
-void launch_attention_weighted_sum_kernel(const float* scores, const float* v, float* context, int seq, int heads, int head_dim, cudaStream_t stream) { attention_weighted_sum_kernel<<<ceil_div(seq*heads*head_dim,256),256,0,stream>>>(scores,v,context,seq,heads,head_dim);} 
+void launch_attention_weighted_sum_kernel(const float* scores, const float* v, float* context, int seq, int q_heads, int kv_heads, int head_dim, cudaStream_t stream) { attention_weighted_sum_kernel<<<ceil_div(seq*q_heads*head_dim,256),256,0,stream>>>(scores,v,context,seq,q_heads,kv_heads,head_dim);} 

@@ -25,7 +25,7 @@ private:
     int num_nodes_ = 0, num_edges_ = 0, token_len_ = 0;
 
     // config dims
-    int dim_ = 0, n_layers_ = 0, n_heads_ = 0, head_dim_ = 0;
+    int dim_ = 0, n_layers_ = 0, n_heads_ = 0, kv_heads_ = 0, kv_dim_ = 0, head_dim_ = 0;
     float norm_eps_ = 1e-5f;
 
     // output

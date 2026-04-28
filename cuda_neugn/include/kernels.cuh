@@ -30,7 +30,7 @@ void launch_degree_kernel(const int64_t* dst, int* deg, int e, cudaStream_t stre
 void launch_gcn_aggregate_kernel(const int64_t* src, const int64_t* dst, const int* deg, const float* x, float* out, int e, int dim, cudaStream_t stream = 0);
 void launch_max_pool_kernel(const float* x, float* out, int rows, int dim, cudaStream_t stream = 0);
 
-void launch_attention_scores_kernel(const float* q, const float* k, float* scores, int seq, int heads, int head_dim, cudaStream_t stream = 0);
+void launch_attention_scores_kernel(const float* q, const float* k, float* scores, int seq, int q_heads, int kv_heads, int head_dim, cudaStream_t stream = 0);
 void launch_attention_mask_row_kernel(float* scores, int seq, int heads, int valid_rows, cudaStream_t stream = 0);
 void launch_softmax_rows_kernel(float* scores, int rows, int cols, cudaStream_t stream = 0);
-void launch_attention_weighted_sum_kernel(const float* scores, const float* v, float* context, int seq, int heads, int head_dim, cudaStream_t stream = 0);
+void launch_attention_weighted_sum_kernel(const float* scores, const float* v, float* context, int seq, int q_heads, int kv_heads, int head_dim, cudaStream_t stream = 0);
