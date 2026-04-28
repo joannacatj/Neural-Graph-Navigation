@@ -17,8 +17,7 @@ python export_demo_inputs.py \
   --num_queries 200 \
   --nav_depth 10 \
   --seed 42 \
-  --device "$DEVICE" \
-  --output_python_csv "../${OUT_DIR#./}/demo_py_results.csv"
+  --device "$DEVICE"
 popd >/dev/null
 
 cmake -S cuda_neugn -B build_cuda_neugn -DCMAKE_BUILD_TYPE=Release
@@ -33,7 +32,3 @@ cmake --build build_cuda_neugn -j --target demo_cu
   --nav_depth 10 \
   --seed 42 \
   --print_first 5
-
-python scripts/compare_demo_py_cu.py \
-  --python_csv "$OUT_DIR/demo_py_results.csv" \
-  --cuda_csv "$OUT_DIR/demo_cu_results.csv"

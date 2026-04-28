@@ -1,8 +1,6 @@
 import argparse
 import os
 import struct
-import subprocess
-import sys
 import torch
 
 from demo import (
@@ -28,7 +26,6 @@ def parse_args():
     p.add_argument("--nav_depth", default=10, type=int)
     p.add_argument("--seed", default=42, type=int)
     p.add_argument("--device", default=None, type=str)
-    p.add_argument("--output_python_csv", default="../cuda_export/wikics/demo_py_results.csv", type=str)
     return p.parse_args()
 
 
@@ -102,24 +99,7 @@ def main():
 
     query_json = os.path.join(demo_input, "queries.json")
     save_query_stream(query_json, queries)
-
-    cmd = [
-        sys.executable, "demo.py",
-        "--config_path", args.config_path,
-        "--graph_path", args.graph_path if args.graph_path else "",
-        "--dataset", dataset_name,
-        "--query_size", str(args.query_size),
-        "--num_queries", str(args.num_queries),
-        "--nav_depth", str(args.nav_depth),
-        "--seed", str(args.seed),
-        "--device", str(device),
-        "--load_queries", query_json,
-        "--output", args.output_python_csv,
-    ]
-    cmd = [x for x in cmd if x != ""]
-    subprocess.run(cmd, check=True, cwd=os.path.dirname(__file__))
     print(f"[done] demo inputs exported to {demo_input}")
-    print(f"[done] python demo csv: {args.output_python_csv}")
 
 
 if __name__ == "__main__":
