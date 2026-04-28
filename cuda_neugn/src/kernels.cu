@@ -141,7 +141,8 @@ __global__ void attention_scores_kernel(const float* q, const float* k, float* s
         int j = idx % seq;
         int i = (idx / seq) % seq;
         int h = idx / (seq * seq);
-        int hk = h % kv_heads;
+        int n_rep = q_heads / kv_heads;
+        int hk = h / n_rep;
         float acc = 0.0f;
         for (int d = 0; d < head_dim; ++d) {
             int qidx = i * (q_heads * head_dim) + h * head_dim + d;
@@ -190,7 +191,8 @@ __global__ void attention_weighted_sum_kernel(const float* scores, const float* 
         int d = idx % head_dim;
         int h = (idx / head_dim) % q_heads;
         int i = idx / (head_dim * q_heads);
-        int hk = h % kv_heads;
+        int n_rep = q_heads / kv_heads;
+        int hk = h / n_rep;
 
         float acc = 0.0f;
         int row = h * seq + i;
