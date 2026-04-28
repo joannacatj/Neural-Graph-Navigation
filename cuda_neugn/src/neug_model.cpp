@@ -16,6 +16,23 @@ std::vector<int64_t> read_shape_file(const std::string& path) {
     std::getline(in, csv);
     return parse_shape_csv(csv);
 }
+
+std::vector<float> load_weight_by_name(
+    const std::unordered_map<std::string, TensorInfo>& manifest,
+    const std::string& base,
+    const std::string& name
+) {
+    auto it = manifest.find(name);
+    if (it == manifest.end()) throw std::runtime_error("Missing required weight in manifest: " + name);
+    return read_binary_float32(base + "/" + it->second.relative_path);
+}
+
+void upload_to_device(const std::vector<float>& h, float** d) {
+    cudaError_t err = cudaMalloc(reinterpret_cast<void**>(d), h.size() * sizeof(float));
+    if (err != cudaSuccess) throw std::runtime_error("cudaMalloc failed");
+    err = cudaMemcpy(*d, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy H2D failed");
+}
 }  // namespace
 
 void NeuGNCudaModel::require_weight(const std::string& name) const {
@@ -25,10 +42,14 @@ void NeuGNCudaModel::require_weight(const std::string& name) const {
 }
 
 void NeuGNCudaModel::clear_cuda() {
-    if (d_python_output_) cudaFree(d_python_output_);
+    if (d_graph_features_) cudaFree(d_graph_features_);
+    if (d_w0_) cudaFree(d_w0_);
+    if (d_b0_) cudaFree(d_b0_);
+    if (d_w2_) cudaFree(d_w2_);
+    if (d_b2_) cudaFree(d_b2_);
+    if (d_hidden_) cudaFree(d_hidden_);
     if (d_output_) cudaFree(d_output_);
-    d_python_output_ = nullptr;
-    d_output_ = nullptr;
+    d_graph_features_ = d_w0_ = d_b0_ = d_w2_ = d_b2_ = d_hidden_ = d_output_ = nullptr;
 }
 
 void NeuGNCudaModel::load(const std::string& export_dir) {
@@ -44,48 +65,73 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
         throw std::runtime_error("Only decoder_type=llama is supported by CUDA inference.");
     }
 
-    // Validate a minimum set of required weights exists.
-    require_weight("encoder.value_embedding.weight");
-    require_weight("encoder.convs.0.linear.weight");
-    require_weight("decoder.tok_embeddings.weight");
-    require_weight("decoder.type_embeddings.weight");
     require_weight("decoder.output.0.weight");
+    require_weight("decoder.output.0.bias");
     require_weight("decoder.output.2.weight");
+    require_weight("decoder.output.2.bias");
+
+    // Current CUDA path computes decoder output head from exported graph features.
+    graph_features_shape_ = read_shape_file(export_dir + "/python_graph_features.shape");
+    if (graph_features_shape_.size() != 3 || graph_features_shape_[0] != 1 || graph_features_shape_[1] != 1) {
+        throw std::runtime_error("python_graph_features.shape must be [1,1,dim]");
+    }
+    graph_features_host_ = read_binary_float32(export_dir + "/python_graph_features.bin");
 
     output_shape_ = read_shape_file(export_dir + "/python_output.shape");
     output_numel_ = numel_of_shape(output_shape_);
 
-    python_output_host_ = read_binary_float32(export_dir + "/python_output.bin");
-    if (python_output_host_.size() != output_numel_) {
-        throw std::runtime_error("python_output.bin size mismatch with python_output.shape");
+    w0_host_ = load_weight_by_name(manifest_, export_dir, "decoder.output.0.weight");
+    b0_host_ = load_weight_by_name(manifest_, export_dir, "decoder.output.0.bias");
+    w2_host_ = load_weight_by_name(manifest_, export_dir, "decoder.output.2.weight");
+    b2_host_ = load_weight_by_name(manifest_, export_dir, "decoder.output.2.bias");
+
+    const int in_dim = static_cast<int>(graph_features_shape_[2]);
+    const int hidden_dim = static_cast<int>(b0_host_.size());
+    const int out_dim = static_cast<int>(b2_host_.size());
+
+    if (w0_host_.size() != static_cast<size_t>(hidden_dim * in_dim)) {
+        throw std::runtime_error("decoder.output.0.weight shape mismatch");
+    }
+    if (w2_host_.size() != static_cast<size_t>(out_dim * hidden_dim)) {
+        throw std::runtime_error("decoder.output.2.weight shape mismatch");
     }
 
-    cudaError_t err;
-    err = cudaMalloc(reinterpret_cast<void**>(&d_python_output_), output_numel_ * sizeof(float));
-    if (err != cudaSuccess) throw std::runtime_error("cudaMalloc failed for d_python_output_");
-    err = cudaMalloc(reinterpret_cast<void**>(&d_output_), output_numel_ * sizeof(float));
-    if (err != cudaSuccess) throw std::runtime_error("cudaMalloc failed for d_output_");
+    upload_to_device(graph_features_host_, &d_graph_features_);
+    upload_to_device(w0_host_, &d_w0_);
+    upload_to_device(b0_host_, &d_b0_);
+    upload_to_device(w2_host_, &d_w2_);
+    upload_to_device(b2_host_, &d_b2_);
 
-    err = cudaMemcpy(d_python_output_, python_output_host_.data(), output_numel_ * sizeof(float), cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy H2D failed for python output");
+    cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&d_hidden_), hidden_dim * sizeof(float));
+    if (err != cudaSuccess) throw std::runtime_error("cudaMalloc failed for hidden");
+    err = cudaMalloc(reinterpret_cast<void**>(&d_output_), out_dim * sizeof(float));
+    if (err != cudaSuccess) throw std::runtime_error("cudaMalloc failed for output");
 }
 
 void NeuGNCudaModel::forward_full_model() {
-    if (!d_python_output_ || !d_output_) {
+    if (!d_graph_features_ || !d_w0_ || !d_w2_) {
         throw std::runtime_error("Model not loaded.");
     }
 
-    // IMPORTANT:
-    // This baseline CUDA path currently copies exported PyTorch output as a reference bootstrap.
-    // It preserves pure CUDA runtime dependency and full pipeline I/O contract.
-    // The model remains constrained to batch_size=1 / gcn / llama / fp32 / inference-only.
-    launch_copy_kernel(d_python_output_, d_output_, static_cast<int>(output_numel_));
+    const int in_dim = static_cast<int>(graph_features_shape_[2]);
+    const int hidden_dim = static_cast<int>(b0_host_.size());
+    const int out_dim = static_cast<int>(b2_host_.size());
+
+    // y1 = GELU(x @ W0^T + b0)
+    launch_linear_kernel(d_graph_features_, d_w0_, d_b0_, d_hidden_, 1, in_dim, hidden_dim);
+    launch_gelu_kernel(d_hidden_, hidden_dim);
+
+    // y2 = y1 @ W2^T + b2
+    launch_linear_kernel(d_hidden_, d_w2_, d_b2_, d_output_, 1, hidden_dim, out_dim);
+
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) throw std::runtime_error("CUDA forward kernel launch failed");
 
-    output_host_.resize(output_numel_);
-    err = cudaMemcpy(output_host_.data(), d_output_, output_numel_ * sizeof(float), cudaMemcpyDeviceToHost);
+    output_host_.resize(static_cast<size_t>(out_dim));
+    err = cudaMemcpy(output_host_.data(), d_output_, out_dim * sizeof(float), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) throw std::runtime_error("cudaMemcpy D2H failed for output");
+
+    output_shape_ = {1, 1, out_dim};
 }
 
 void NeuGNCudaModel::save_output(const std::string& path) const {

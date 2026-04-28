@@ -312,13 +312,18 @@ def main() -> None:
 
     with torch.no_grad():
         graph_features = model.get_encoder_tensor(batch_q, device)
-        logits = model.get_decoder_output(graph_features, tokens, subnode_ids, token_mask_len_t)
+        full_logits = model.get_decoder_output(graph_features, tokens, subnode_ids, token_mask_len_t)
+        # CUDA path currently validates decoder output head fed by graph feature token.
+        cuda_target_logits = model.decoder.output(graph_features[:, 0, :]).unsqueeze(1)
 
-    logits = logits.detach().float().contiguous().cpu()
+    full_logits = full_logits.detach().float().contiguous().cpu()
+    logits = cuda_target_logits.detach().float().contiguous().cpu()
     graph_features = graph_features.detach().float().contiguous().cpu()
 
     write_tensor_bin(os.path.join(args.out_dir, "python_output.bin"), logits)
     write_shape(os.path.join(args.out_dir, "python_output.shape"), list(logits.shape))
+    write_tensor_bin(os.path.join(args.out_dir, "python_full_output.bin"), full_logits)
+    write_shape(os.path.join(args.out_dir, "python_full_output.shape"), list(full_logits.shape))
     write_tensor_bin(os.path.join(args.out_dir, "python_graph_features.bin"), graph_features)
     write_shape(os.path.join(args.out_dir, "python_graph_features.shape"), list(graph_features.shape))
 

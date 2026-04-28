@@ -20,10 +20,18 @@ private:
     std::unordered_map<std::string, std::string> config_;
     std::unordered_map<std::string, TensorInfo> manifest_;
 
-    std::vector<float> python_output_host_;
+    std::vector<float> graph_features_host_;
+    std::vector<int64_t> graph_features_shape_;
     std::vector<int64_t> output_shape_;
 
-    float* d_python_output_ = nullptr;
+    std::vector<float> w0_host_, b0_host_, w2_host_, b2_host_;
+
+    float* d_graph_features_ = nullptr;
+    float* d_w0_ = nullptr;
+    float* d_b0_ = nullptr;
+    float* d_w2_ = nullptr;
+    float* d_b2_ = nullptr;
+    float* d_hidden_ = nullptr;
     float* d_output_ = nullptr;
     size_t output_numel_ = 0;
 

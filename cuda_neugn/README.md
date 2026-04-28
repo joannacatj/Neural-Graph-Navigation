@@ -20,3 +20,8 @@ This runs:
 2. CMake build of `cuda_neugn`.
 3. CUDA executable inference and output dump.
 4. `scripts/compare_outputs.py` numeric comparison (atol/rtol = 1e-4 by default).
+
+
+Current forward implementation status:
+- CUDA computes decoder output head (`decoder.output`) from exported `python_graph_features` as validation target.
+- Full end-to-end transformer stack CUDA parity is still in progress.
