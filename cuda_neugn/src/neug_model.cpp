@@ -267,7 +267,11 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
     }
 
     // Validate embedding dims.
-    require_2d_shape(manifest_, "encoder.value_embedding.weight", manifest_.at("encoder.value_embedding.weight").shape.at(0), dim_);
+    enc_in_dim_ = static_cast<int>(manifest_.at("encoder.value_embedding.weight").shape.at(1));
+    if (enc_in_dim_ <= 0) {
+        throw std::runtime_error("Invalid encoder embedding dim: " + std::to_string(enc_in_dim_));
+    }
+    require_2d_shape(manifest_, "encoder.value_embedding.weight", manifest_.at("encoder.value_embedding.weight").shape.at(0), enc_in_dim_);
     require_2d_shape(manifest_, "decoder.tok_embeddings.weight", manifest_.at("decoder.tok_embeddings.weight").shape.at(0), dim_);
     require_2d_shape(manifest_, "decoder.node_embeddings.ne", manifest_.at("decoder.node_embeddings.ne").shape.at(0), dim_);
     require_2d_shape(manifest_, "decoder.type_embeddings.weight", manifest_.at("decoder.type_embeddings.weight").shape.at(0), dim_);
@@ -306,6 +310,22 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
         require_2d_shape(manifest_, p + "attention.wo.weight", dim_, dim_);
     }
 
+    // Validate encoder layer widths: first layer maps enc_in_dim -> dim, subsequent layers keep dim -> dim.
+    for (int l = 0; l < cfg_int(config_, "encoder_layers"); ++l) {
+        std::string p = "encoder.convs." + std::to_string(l) + ".linear.";
+        int in_dim = (l == 0) ? enc_in_dim_ : dim_;
+        require_2d_shape(manifest_, p + "weight", dim_, in_dim);
+        auto b_name = p + "bias";
+        auto b_it = manifest_.find(b_name);
+        if (b_it == manifest_.end()) throw std::runtime_error("Missing required weight in manifest: " + b_name);
+        const auto& b_shape = b_it->second.shape;
+        if (b_shape.size() != 1 || b_shape[0] != dim_) {
+            throw std::runtime_error(
+                "Unsupported bias shape for " + b_name + ", expected [" + std::to_string(dim_) + "] got " + shape_to_string(b_shape)
+            );
+        }
+    }
+
     // Validate index tensors early to avoid opaque illegal-memory-access errors later in kernels.
     const int64_t value_vocab = manifest_.at("encoder.value_embedding.weight").shape.at(0);
     const int64_t token_vocab = manifest_.at("decoder.tok_embeddings.weight").shape.at(0);
@@ -327,8 +347,9 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
     upload_to_device_i64(subnode_h_, &d_subnode_);
 
     checked_cuda_malloc(reinterpret_cast<void**>(&d_deg_), checked_count_bytes(static_cast<size_t>(num_nodes_), sizeof(int), "d_deg_"), "d_deg_");
-    checked_cuda_malloc(reinterpret_cast<void**>(&d_h_), checked_count_bytes(static_cast<size_t>(num_nodes_) * static_cast<size_t>(dim_), sizeof(float), "d_h_"), "d_h_");
-    checked_cuda_malloc(reinterpret_cast<void**>(&d_tmp_), checked_count_bytes(static_cast<size_t>(num_nodes_) * static_cast<size_t>(dim_), sizeof(float), "d_tmp_"), "d_tmp_");
+    const int encoder_work_dim = std::max(dim_, enc_in_dim_);
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_h_), checked_count_bytes(static_cast<size_t>(num_nodes_) * static_cast<size_t>(encoder_work_dim), sizeof(float), "d_h_"), "d_h_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_tmp_), checked_count_bytes(static_cast<size_t>(num_nodes_) * static_cast<size_t>(encoder_work_dim), sizeof(float), "d_tmp_"), "d_tmp_");
     checked_cuda_malloc(reinterpret_cast<void**>(&d_graph_), checked_count_bytes(static_cast<size_t>(dim_), sizeof(float), "d_graph_"), "d_graph_");
 
     int seq = 1 + token_len_;
@@ -359,11 +380,12 @@ void NeuGNCudaModel::forward_full_model() {
     auto val_emb = load_weight_by_name(manifest_, export_dir_, "encoder.value_embedding.weight");
     float* d_val_emb = nullptr;
     upload_to_device(val_emb, &d_val_emb);
-    launch_embedding_lookup_kernel(d_feat_id_, d_val_emb, d_h_, num_nodes_, dim_);
+    launch_embedding_lookup_kernel(d_feat_id_, d_val_emb, d_h_, num_nodes_, enc_in_dim_);
     check_last_cuda_error("encoder.value_embedding lookup");
 
     for (int l = 0; l < cfg_int(config_, "encoder_layers"); ++l) {
         std::string prefix = "encoder.convs." + std::to_string(l) + ".linear.";
+        int layer_in_dim = (l == 0) ? enc_in_dim_ : dim_;
         auto w = load_weight_by_name(manifest_, export_dir_, prefix + "weight");
         auto b = load_weight_by_name(manifest_, export_dir_, prefix + "bias");
         float *d_w = nullptr, *d_b = nullptr;
@@ -372,9 +394,9 @@ void NeuGNCudaModel::forward_full_model() {
 
         launch_zero_int(d_deg_, num_nodes_);
         launch_degree_kernel(d_dst_, d_deg_, e);
-        launch_zero_float(d_tmp_, num_nodes_ * dim_);
-        launch_gcn_aggregate_kernel(d_src_, d_dst_, d_deg_, d_h_, d_tmp_, e, dim_);
-        launch_linear_kernel(d_tmp_, d_w, d_b, d_h_, num_nodes_, dim_, dim_);
+        launch_zero_float(d_tmp_, num_nodes_ * layer_in_dim);
+        launch_gcn_aggregate_kernel(d_src_, d_dst_, d_deg_, d_h_, d_tmp_, e, layer_in_dim);
+        launch_linear_kernel(d_tmp_, d_w, d_b, d_h_, num_nodes_, layer_in_dim, dim_);
         launch_relu_kernel(d_h_, num_nodes_ * dim_);
         check_last_cuda_error("encoder.gcn layer " + std::to_string(l));
 
