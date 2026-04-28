@@ -377,8 +377,11 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
 
     checked_cuda_malloc(reinterpret_cast<void**>(&d_deg_), checked_count_bytes(static_cast<size_t>(num_nodes_), sizeof(int), "d_deg_"), "d_deg_");
     const int encoder_work_dim = std::max(dim_, enc_in_dim_);
-    checked_cuda_malloc(reinterpret_cast<void**>(&d_h_), checked_count_bytes(static_cast<size_t>(num_nodes_) * static_cast<size_t>(encoder_work_dim), sizeof(float), "d_h_"), "d_h_");
-    checked_cuda_malloc(reinterpret_cast<void**>(&d_tmp_), checked_count_bytes(static_cast<size_t>(num_nodes_) * static_cast<size_t>(encoder_work_dim), sizeof(float), "d_tmp_"), "d_tmp_");
+    const size_t encoder_elems = static_cast<size_t>(num_nodes_) * static_cast<size_t>(encoder_work_dim);
+    const size_t decoder_elems = static_cast<size_t>(1 + token_len_) * static_cast<size_t>(dim_);
+    const size_t tmp_elems = std::max(encoder_elems, decoder_elems);
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_h_), checked_count_bytes(encoder_elems, sizeof(float), "d_h_"), "d_h_");
+    checked_cuda_malloc(reinterpret_cast<void**>(&d_tmp_), checked_count_bytes(tmp_elems, sizeof(float), "d_tmp_"), "d_tmp_");
     checked_cuda_malloc(reinterpret_cast<void**>(&d_graph_), checked_count_bytes(static_cast<size_t>(dim_), sizeof(float), "d_graph_"), "d_graph_");
 
     int seq = 1 + token_len_;
