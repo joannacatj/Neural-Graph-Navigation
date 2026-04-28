@@ -24,7 +24,6 @@ cymem==2.0.8
 debugpy==1.6.7
 decorator==5.1.1
 deepsnap==0.2.1
-dgl==2.4.0+cu121
 distro==1.9.0
 en-core-web-sm==3.7.1
 exceptiongroup==1.2.2
@@ -112,7 +111,6 @@ py-cpuinfo==9.0.0
 pycryptodomex==3.20.0
 pydantic==2.8.2
 pydantic_core==2.20.1
-pyg_lib==0.4.0+pt23cu121
 Pygments==2.18.0
 pyparsing==3.1.2
 python-box==7.3.0
@@ -153,11 +151,6 @@ tiktoken==0.7.0
 tokenizers==0.19.1
 toolz==1.0.0
 torch==2.3.1+cu121
-torch_cluster==1.6.3+pt23cu121
-torch_geometric==2.5.3
-torch_scatter==2.1.2+pt23cu121
-torch_sparse==0.6.18+pt23cu121
-torch_spline_conv==1.2.2+pt23cu121
 torchaudio==2.3.1+cu121
 torchdata==0.8.0
 torchvision==0.18.1+cu121

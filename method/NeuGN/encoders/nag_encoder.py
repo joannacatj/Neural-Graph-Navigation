@@ -5,7 +5,7 @@ import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 import ipdb
-import dgl
+from NeuGN.pt_graph import global_mean_pool
 
 def init_params(module, n_layers):
     if isinstance(module, nn.Linear):
@@ -60,11 +60,10 @@ class NAGEncoder(nn.Module):
 
     def forward(self, batched_data):
 
-        h_id = batched_data.ndata['feat_id']
+        h_id = batched_data.feat_id
         features = self.value_embedding(h_id)
         
-        src, dst = batched_data.edges()
-        edge_index = torch.stack([src, dst], dim=0)
+        edge_index = batched_data.edge_index
 
         num_nodes = features.shape[0]
         adj = torch.zeros((num_nodes, num_nodes), dtype=torch.float32, device=features.device)
@@ -103,10 +102,7 @@ class NAGEncoder(nn.Module):
         output = self.Linear1(torch.relu(self.out_proj(output)))
 
         # Set the updated features back to the graph
-        batched_data.ndata['h'] = output
-
-        # Use dgl.readout_nodes to perform max pooling for each graph in the batch
-        output = dgl.readout_nodes(batched_data, 'h', op='mean')
+        output = global_mean_pool(output, batched_data.batch)
     
         return output
 

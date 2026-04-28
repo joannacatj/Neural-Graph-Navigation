@@ -3,7 +3,6 @@
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
-from NeuGN.encoders.graphGT_encoder import GraphsGPTEncoder, GraphsGPTEncoderOutput
 from NeuGN.encoders.mpnn_encoder import GNN
 from NeuGN.encoders.nag_encoder import NAGEncoder
 import fairscale.nn.model_parallel.initialize as fs_init
@@ -15,8 +14,6 @@ from fairscale.nn.model_parallel.layers import (
     VocabParallelEmbedding,
 )
 from torch import nn
-from dgl.nn import GraphConv, GATConv, GINConv
-import dgl
 import ipdb
 import box
 
@@ -365,6 +362,7 @@ class GraphDecoder(nn.Module):
         if self.encoder_type in self.gnn_list:
             self.encoder = GNN(params)
         elif self.encoder_type == 'gt':
+            from NeuGN.encoders.graphGT_encoder import GraphsGPTEncoder
             self.encoder = GraphsGPTEncoder(params)
         elif self.encoder_type == 'nagphormer':
             self.encoder = NAGEncoder(params.encoder_config)
@@ -374,7 +372,7 @@ class GraphDecoder(nn.Module):
         elif self.decoder_type == 'mlp':
             self.decoder =  ResidualMLP(params)
         self.dim = params.decoder_config.dim
-        self.finger_num = params.gt_config.num_fingerprints
+        self.finger_num = getattr(getattr(params, "gt_config", {}), "num_fingerprints", 0)
         
     def get_encoder_tensor(self, batch_graphs, device):
         if self.encoder_type == 'gt':
@@ -399,7 +397,7 @@ class GraphDecoder(nn.Module):
 
     def forward(self, batch_graphs, tokens: torch.Tensor, subnode_ids: torch.Tensor, token_mask_len: torch.Tensor, start_pos: int, device):
         if self.encoder_type == 'gt':
-            encoder_output:GraphsGPTEncoderOutput = self.encoder(batch_graphs, device)
+            encoder_output = self.encoder(batch_graphs, device)
             graph_features = encoder_output.fingerprint_tokens
             # graph_features = encoder_output.inputs_embeds
         elif self.encoder_type in self.gnn_list:

@@ -1,7 +1,6 @@
 import torch
 import os
 from datetime import datetime
-os.environ['DGLBACKEND'] = 'pytorch'
 from torch import nn, optim
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
@@ -15,7 +14,7 @@ from tqdm import tqdm
 import yaml
 from dataclasses import dataclass, asdict
 
-import dgl
+from NeuGN.pt_graph import PTGraph
 import time
 import argparse
 import numpy as np
@@ -24,6 +23,14 @@ from torch.utils.tensorboard import SummaryWriter
 # from transformers import Trainer
 from NeuGN.nx_utils import graph2path_v2
 import random
+
+
+class NullWriter:
+    def add_scalar(self, *args, **kwargs):
+        return
+
+    def add_scalars(self, *args, **kwargs):
+        return
 
 
 def train_one_epoch(model, graph, graph_tokenizer, dataloader, criterion, optimizer, params, device, epoch, writer):
@@ -166,6 +173,8 @@ def eval_one_epoch(model, dataloader1, dataloader20, dataloader_rand, criterion,
 def main(args):
     # Device configuration
     local_rank = args.local_rank
+    if local_rank < 0:
+        local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", 0)))
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     dist.init_process_group(backend='nccl')
@@ -187,10 +196,14 @@ def main(args):
 
     now = datetime.now()
     formatted_time = now.strftime("%Y_%m_%d_%H_%M_%S")
-    writer_path = f'../../../experiments/results/logs_{params.encoder_config.encoder_name}_{params.decoder_config.decoder_type}_{formatted_time}'
-    writer = SummaryWriter(writer_path)
-    with open(os.path.join(writer_path, 'model_args.yaml'), 'w') as f:
-        yaml.dump(params.to_dict(), f, default_flow_style=False, sort_keys=False)
+    writer_path = os.path.join(args.config_path, f'logs_{params.encoder_config.encoder_name}_{params.decoder_config.decoder_type}_{formatted_time}')
+    if dist.get_rank() == 0:
+        os.makedirs(writer_path, exist_ok=True)
+        writer = SummaryWriter(writer_path)
+        with open(os.path.join(writer_path, 'model_args.yaml'), 'w') as f:
+            yaml.dump(params.to_dict(), f, default_flow_style=False, sort_keys=False)
+    else:
+        writer = NullWriter()
         
     value2id = save_value2id(node_values_uni, args.config_path, dataset_name)
     
@@ -199,10 +212,11 @@ def main(args):
     edge_index_src = torch.tensor([edge_src_ids], dtype=torch.long).squeeze(0)
     edge_index_dst = torch.tensor([edge_dst_ids], dtype=torch.long).squeeze(0)
     
-    graph = dgl.graph((edge_index_src, edge_index_dst), num_nodes=num_nodes)
+    edge_index = torch.stack([edge_index_src, edge_index_dst], dim=0)
+    graph = PTGraph(edge_index=edge_index, num_nodes=num_nodes)
     node_values_id = torch.tensor([value2id[str(node_value)] for node_value in node_values])
     print(len(node_values_id))
-    graph.ndata['feat_id'] = node_values_id
+    graph.feat_id = node_values_id
     
 
 
@@ -256,7 +270,7 @@ def main(args):
         
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--local-rank", default=-1, type=int)
+parser.add_argument("--local-rank", "--local_rank", dest="local_rank", default=-1, type=int)
 parser.add_argument("--epochs", default=5000, type=int)
 parser.add_argument('--load_params', default=1, type=int)
 parser.add_argument('--config_path', default='./model_params/wikics', type=str)

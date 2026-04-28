@@ -1,4 +1,4 @@
-from llama.graph_tokenizer import GraphTokenizer
+from NeuGN.graph_tokenizer import GraphTokenizer
 import torch
 from torch.utils.data import Dataset
 import random

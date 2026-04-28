@@ -13,12 +13,14 @@ import itertools
 from typing import List, Tuple, Dict, Union, Iterable
 import torch
 from torch import Tensor
-from dgl import to_networkx, DGLGraph
-import dgl
+from NeuGN.pt_graph import PTGraph
 
 
-def graph2path_v2(graph: DGLGraph) -> List[Tuple[int, int]]:
-    G = to_networkx(graph).to_undirected()
+def graph2path_v2(graph: PTGraph) -> List[Tuple[int, int]]:
+    src, dst = graph.edge_index
+    G = nx.Graph()
+    G.add_nodes_from(range(graph.num_nodes))
+    G.add_edges_from(zip(src.tolist(), dst.tolist()))
     # 1. create list of subgraphs
     if not nx.is_connected(G):
         S = [G.subgraph(c).copy() for c in nx.connected_components(G)]
