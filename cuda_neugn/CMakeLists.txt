@@ -26,6 +26,13 @@ add_executable(neugn_demo
   src/kernels.cu
 )
 
+add_executable(demo_cu
+  demo.cu
+  src/tensor_io.cpp
+  src/neug_model.cpp
+  src/kernels.cu
+)
+
 target_include_directories(neugn_cuda PRIVATE
   include
   ${CUDAToolkit_INCLUDE_DIRS}
@@ -39,3 +46,10 @@ target_include_directories(neugn_demo PRIVATE
 )
 target_link_libraries(neugn_demo PRIVATE CUDA::cudart)
 set_target_properties(neugn_demo PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+target_include_directories(demo_cu PRIVATE
+  include
+  ${CUDAToolkit_INCLUDE_DIRS}
+)
+target_link_libraries(demo_cu PRIVATE CUDA::cudart)
+set_target_properties(demo_cu PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
