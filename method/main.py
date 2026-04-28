@@ -25,6 +25,14 @@ from NeuGN.nx_utils import graph2path_v2
 import random
 
 
+class NullWriter:
+    def add_scalar(self, *args, **kwargs):
+        return
+
+    def add_scalars(self, *args, **kwargs):
+        return
+
+
 def train_one_epoch(model, graph, graph_tokenizer, dataloader, criterion, optimizer, params, device, epoch, writer):
     model.train()
     # model.eval()
@@ -188,10 +196,14 @@ def main(args):
 
     now = datetime.now()
     formatted_time = now.strftime("%Y_%m_%d_%H_%M_%S")
-    writer_path = f'../../../experiments/results/logs_{params.encoder_config.encoder_name}_{params.decoder_config.decoder_type}_{formatted_time}'
-    writer = SummaryWriter(writer_path)
-    with open(os.path.join(writer_path, 'model_args.yaml'), 'w') as f:
-        yaml.dump(params.to_dict(), f, default_flow_style=False, sort_keys=False)
+    writer_path = os.path.join(args.config_path, f'logs_{params.encoder_config.encoder_name}_{params.decoder_config.decoder_type}_{formatted_time}')
+    if dist.get_rank() == 0:
+        os.makedirs(writer_path, exist_ok=True)
+        writer = SummaryWriter(writer_path)
+        with open(os.path.join(writer_path, 'model_args.yaml'), 'w') as f:
+            yaml.dump(params.to_dict(), f, default_flow_style=False, sort_keys=False)
+    else:
+        writer = NullWriter()
         
     value2id = save_value2id(node_values_uni, args.config_path, dataset_name)
     
