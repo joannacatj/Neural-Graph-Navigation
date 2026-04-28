@@ -21,6 +21,19 @@ This runs:
 3. CUDA executable inference and output dump.
 4. `scripts/compare_outputs.py` numeric comparison (atol/rtol = 1e-4 by default).
 
+Run the C++/CUDA demo flow (similar purpose to `method/demo.py` for parity/timing on exported fixtures):
+
+```bash
+./build_cuda_neugn/neugn_demo \
+  --export_dir ./cuda_export/hamster \
+  --output ./cuda_export/hamster/cuda_output.bin \
+  --python_ref ./cuda_export/hamster/python_output.bin \
+  --shape ./cuda_export/hamster/python_output.shape \
+  --warmup 1 \
+  --runs 10 \
+  --topk 5
+```
+
 
 Current forward implementation status:
 - CUDA path now includes GCN encoder + llama decoder stack for batch_size=1 inference.
