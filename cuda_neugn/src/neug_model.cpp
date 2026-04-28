@@ -137,6 +137,33 @@ void check_last_cuda_error(const std::string& where) {
         throw std::runtime_error(where + ": " + std::string(cudaGetErrorString(err)));
     }
 }
+
+std::string shape_to_string(const std::vector<int64_t>& shape) {
+    std::string s = "[";
+    for (size_t i = 0; i < shape.size(); ++i) {
+        s += std::to_string(shape[i]);
+        if (i + 1 != shape.size()) s += ", ";
+    }
+    s += "]";
+    return s;
+}
+
+void require_2d_shape(
+    const std::unordered_map<std::string, TensorInfo>& manifest,
+    const std::string& name,
+    int64_t d0,
+    int64_t d1
+) {
+    auto it = manifest.find(name);
+    if (it == manifest.end()) throw std::runtime_error("Missing required weight in manifest: " + name);
+    const auto& s = it->second.shape;
+    if (s.size() != 2 || s[0] != d0 || s[1] != d1) {
+        throw std::runtime_error(
+            "Unsupported weight shape for " + name +
+            ", expected [" + std::to_string(d0) + ", " + std::to_string(d1) + "] got " + shape_to_string(s)
+        );
+    }
+}
 }  // namespace
 
 void NeuGNCudaModel::require_weight(const std::string& name) const {
@@ -229,6 +256,21 @@ void NeuGNCudaModel::load(const std::string& export_dir) {
         require_weight("decoder.layers." + std::to_string(i) + ".feed_forward.w1.weight");
         require_weight("decoder.layers." + std::to_string(i) + ".feed_forward.w2.weight");
         require_weight("decoder.layers." + std::to_string(i) + ".feed_forward.w3.weight");
+    }
+
+    // Current CUDA reference path assumes full-head attention projection sizes (q/k/v/o all [dim, dim]).
+    require_2d_shape(manifest_, "encoder.value_embedding.weight", manifest_.at("encoder.value_embedding.weight").shape.at(0), dim_);
+    require_2d_shape(manifest_, "decoder.tok_embeddings.weight", manifest_.at("decoder.tok_embeddings.weight").shape.at(0), dim_);
+    require_2d_shape(manifest_, "decoder.node_embeddings.ne", manifest_.at("decoder.node_embeddings.ne").shape.at(0), dim_);
+    require_2d_shape(manifest_, "decoder.type_embeddings.weight", manifest_.at("decoder.type_embeddings.weight").shape.at(0), dim_);
+    require_2d_shape(manifest_, "decoder.pos_embeddings.pe", manifest_.at("decoder.pos_embeddings.pe").shape.at(0), dim_);
+
+    for (int i = 0; i < n_layers_; ++i) {
+        const std::string p = "decoder.layers." + std::to_string(i) + ".";
+        require_2d_shape(manifest_, p + "attention.wq.weight", dim_, dim_);
+        require_2d_shape(manifest_, p + "attention.wk.weight", dim_, dim_);
+        require_2d_shape(manifest_, p + "attention.wv.weight", dim_, dim_);
+        require_2d_shape(manifest_, p + "attention.wo.weight", dim_, dim_);
     }
 
     // Validate index tensors early to avoid opaque illegal-memory-access errors later in kernels.
