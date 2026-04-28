@@ -23,5 +23,5 @@ This runs:
 
 
 Current forward implementation status:
-- CUDA computes decoder output head (`decoder.output`) from exported `python_graph_features` as validation target.
-- Full end-to-end transformer stack CUDA parity is still in progress.
+- CUDA path now includes GCN encoder + llama decoder stack for batch_size=1 inference.
+- Implementation uses naive custom CUDA kernels (no cuBLAS/cuDNN) and should be treated as functional reference, not optimized runtime.
