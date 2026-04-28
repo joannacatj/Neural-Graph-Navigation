@@ -4,7 +4,6 @@ from NeuGN.graph_tokenizer import GraphTokenizer
 from NeuGN.model import GraphDecoder
 import random
 import numpy as np
-import dgl
 import os
 import pandas as pd
 import csv
@@ -14,6 +13,26 @@ from box import Box
 import torch
 import torch.distributed as dist
 from NeuGN.nx_utils import graph2path_v2
+from NeuGN.pt_graph import PTBatch, PTGraph
+
+
+def build_subgraph(graph: PTGraph, node_ids):
+    node_ids = sorted(set(int(n) for n in node_ids))
+    node_map = {nid: i for i, nid in enumerate(node_ids)}
+    selected = set(node_ids)
+    src, dst = graph.edge_index
+    edge_pairs = [(int(s), int(d)) for s, d in zip(src.tolist(), dst.tolist()) if int(s) in selected and int(d) in selected]
+    if edge_pairs:
+        sub_src = torch.tensor([node_map[s] for s, _ in edge_pairs], dtype=torch.long)
+        sub_dst = torch.tensor([node_map[d] for _, d in edge_pairs], dtype=torch.long)
+        edge_index = torch.stack([sub_src, sub_dst], dim=0)
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+    sub = PTGraph(edge_index=edge_index, num_nodes=len(node_ids))
+    sub.feat_id = graph.feat_id[torch.tensor(node_ids, dtype=torch.long)]
+    sub.n_id = torch.tensor(node_ids, dtype=torch.long)
+    return sub
+
 
 def metrics(res, labels):
     res = np.concatenate(res)
@@ -191,8 +210,8 @@ def process_input_data(graph, graph_tokenizer:GraphTokenizer, start_nodes, graph
             
     sub_graphs = []
     for walk in valid_graphs:
-        sub_graphs.append(dgl.node_subgraph(graph, list(set(walk))))
-    batch_graphs = dgl.batch(sub_graphs)
+        sub_graphs.append(build_subgraph(graph, list(set(walk))))
+    batch_graphs = PTBatch.from_data_list(sub_graphs)
     if params.dataprocess_config.data_process_method == 'random_walk':
         valid_walks = [valid_graphs[i][:walk_len[i]] for i in range(len(valid_graphs))]
     elif params.dataprocess_config.data_process_method == 'shuffle':
@@ -212,7 +231,7 @@ def process_input_data(graph, graph_tokenizer:GraphTokenizer, start_nodes, graph
         valid_subnodeid_results = []
         max_len = 0
         for sub_graph in sub_graphs:
-            node_id_list = sub_graph.ndata[dgl.NID].tolist()
+            node_id_list = sub_graph.n_id.tolist()
             start_sub_node_num = random.randint(0, params.decoder_config.sub_node_id_size-1)
             nodeid2subnodeid = {}
             for id in node_id_list:

@@ -1,7 +1,6 @@
 import torch
 import os
 from datetime import datetime
-os.environ['DGLBACKEND'] = 'pytorch'
 from torch import nn, optim
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
@@ -15,7 +14,7 @@ from tqdm import tqdm
 import yaml
 from dataclasses import dataclass, asdict
 
-import dgl
+from NeuGN.pt_graph import PTGraph
 import time
 import argparse
 import numpy as np
@@ -199,10 +198,11 @@ def main(args):
     edge_index_src = torch.tensor([edge_src_ids], dtype=torch.long).squeeze(0)
     edge_index_dst = torch.tensor([edge_dst_ids], dtype=torch.long).squeeze(0)
     
-    graph = dgl.graph((edge_index_src, edge_index_dst), num_nodes=num_nodes)
+    edge_index = torch.stack([edge_index_src, edge_index_dst], dim=0)
+    graph = PTGraph(edge_index=edge_index, num_nodes=num_nodes)
     node_values_id = torch.tensor([value2id[str(node_value)] for node_value in node_values])
     print(len(node_values_id))
-    graph.ndata['feat_id'] = node_values_id
+    graph.feat_id = node_values_id
     
 
 

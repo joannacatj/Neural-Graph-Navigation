@@ -15,8 +15,6 @@ from fairscale.nn.model_parallel.layers import (
     VocabParallelEmbedding,
 )
 from torch import nn
-from dgl.nn import GraphConv, GATConv, GINConv
-import dgl
 import ipdb
 import box
 

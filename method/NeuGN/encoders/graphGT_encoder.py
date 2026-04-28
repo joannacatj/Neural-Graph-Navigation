@@ -12,7 +12,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging, ModelOutput
 from typing import List, Optional, Tuple, Union
 
-import dgl
+from NeuGN.pt_graph import PTBatch
 import ipdb
 
 @dataclass
@@ -463,14 +463,18 @@ class GraphsGPTEncoder(nn.Module):
     '''
     def process_batched_graph(self, batched_graph):
 
-        batch_node_count = batched_graph.batch_num_nodes()
-        node_num_all = len(batched_graph.nodes())
+        ptr = batched_graph.ptr
+        batch_node_count = ptr[1:] - ptr[:-1]
+        node_num_all = batched_graph.num_nodes
         max_node_num = int(torch.max(batch_node_count))
-        batch_edge_count = batched_graph.batch_num_edges()
+        graph_list = batched_graph.to_data_list()
+
+        batch_edge_count = []
+        for graph in graph_list:
+            batch_edge_count.append(graph.edge_index.size(1))
+        batch_edge_count = torch.tensor(batch_edge_count, dtype=torch.long, device=batch_node_count.device)
         max_edge_num = int(torch.max(batch_edge_count))
         max_edge_num /= 2 #若是无向边
-        
-        graph_list = dgl.unbatch(batched_graph)
 
         batch_size = len(batch_node_count)
         total_length = int(max_node_num + max_edge_num)
@@ -484,10 +488,11 @@ class GraphsGPTEncoder(nn.Module):
 
         for graph_id, (node_num, edge_num, graph) in enumerate(zip(batch_node_count, batch_edge_count, graph_list)):
             position_ids1, position_ids2, identity, mask = [], [], [], []  ### identity: 1 refers to node
-            node_ids = graph.nodes()
+            node_ids = list(range(graph.num_nodes))
             position_ids1 += node_ids
             position_ids2 += node_ids
-            src_nodes, dst_nodes, edge_ids = graph.edges(form='all')
+            src_nodes, dst_nodes = graph.edge_index
+            edge_ids = torch.arange(graph.edge_index.size(1))
             src_nodes_clean, dst_nodes_clean, edge_ids_clean = [], [], []
             node_ids_batched = [node_id + start_node_id for node_id in node_ids]
             for src_node, dst_node, edge_id in zip(src_nodes, dst_nodes, edge_ids):
@@ -523,7 +528,7 @@ class GraphsGPTEncoder(nn.Module):
 
     def forward_encoder(
             self,
-            batched_graphs: dgl.DGLGraph = None,
+            batched_graphs: PTBatch = None,
             input_ids: torch.LongTensor = None,
             graph_position_ids_1: torch.LongTensor = None,
             graph_position_ids_2: torch.LongTensor = None,
@@ -544,8 +549,8 @@ class GraphsGPTEncoder(nn.Module):
         batch_size, seq_length = identifier_ids.shape
         device = identifier_ids.device
 
-        node_features = self.linear_node(batched_graphs.ndata['feat'])
-        edge_features = self.linear_edge(batched_graphs.edata['feat'])
+        node_features = self.linear_node(batched_graphs.feat)
+        edge_features = self.linear_edge(batched_graphs.edge_feat)
         node_edge_features = torch.cat((node_features, edge_features), dim=0)
         # ipdb.set_trace()
         # input check
