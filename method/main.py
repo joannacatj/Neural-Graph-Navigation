@@ -165,6 +165,8 @@ def eval_one_epoch(model, dataloader1, dataloader20, dataloader_rand, criterion,
 def main(args):
     # Device configuration
     local_rank = args.local_rank
+    if local_rank < 0:
+        local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", 0)))
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     dist.init_process_group(backend='nccl')
@@ -256,7 +258,7 @@ def main(args):
         
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--local-rank", default=-1, type=int)
+parser.add_argument("--local-rank", "--local_rank", dest="local_rank", default=-1, type=int)
 parser.add_argument("--epochs", default=5000, type=int)
 parser.add_argument('--load_params', default=1, type=int)
 parser.add_argument('--config_path', default='./model_params/wikics', type=str)
