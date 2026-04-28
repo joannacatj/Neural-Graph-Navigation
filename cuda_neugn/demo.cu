@@ -470,6 +470,16 @@ void write_csv(const std::string& path, const std::vector<Row>& rows) {
 }
 }  // namespace
 
+
+std::unordered_map<int, int> load_value2id_csv(const std::string& path);
+void load_data_graph_from_text(
+    const DemoArgs& args,
+    int& num_nodes,
+    std::vector<int>& data_src,
+    std::vector<int>& data_dst,
+    std::vector<int>& data_labels
+);
+
 int main(int argc, char** argv) {
     try {
         DemoArgs args = parse_args(argc, argv);
