@@ -10,6 +10,7 @@
 #include <iostream>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -91,7 +92,6 @@ DemoArgs parse_args(int argc, char** argv) {
         else if (a == "--print_first") args.print_first = std::stoi(next());
         else throw std::runtime_error("Unknown argument: " + a);
     }
-    if (args.query_bin.empty()) args.query_bin = args.export_dir + "/demo_input/queries.bin";
     return args;
 }
 
@@ -191,6 +191,94 @@ std::vector<int> read_i32_bin(const std::string& path) {
     std::vector<int32_t> tmp(nbytes / sizeof(int32_t));
     in.read(reinterpret_cast<char*>(tmp.data()), static_cast<std::streamsize>(nbytes));
     return std::vector<int>(tmp.begin(), tmp.end());
+}
+
+std::vector<std::vector<int>> build_data_adj(int n, const std::vector<int>& src, const std::vector<int>& dst) {
+    std::vector<std::vector<int>> adj(n);
+    for (size_t i = 0; i < src.size(); ++i) {
+        int s = src[i], d = dst[i];
+        if (s < 0 || s >= n || d < 0 || d >= n || s == d) continue;
+        adj[s].push_back(d);
+    }
+    for (auto& nbrs : adj) {
+        std::sort(nbrs.begin(), nbrs.end());
+        nbrs.erase(std::unique(nbrs.begin(), nbrs.end()), nbrs.end());
+    }
+    return adj;
+}
+
+Query sample_connected_query(
+    int qid,
+    int query_size,
+    const std::vector<std::vector<int>>& data_adj,
+    const std::vector<int>& data_labels,
+    std::mt19937& rng
+) {
+    int n = static_cast<int>(data_adj.size());
+    if (query_size > n) throw std::runtime_error("query_size > num_nodes");
+    std::uniform_int_distribution<int> uni(0, n - 1);
+
+    for (int t = 0; t < 500; ++t) {
+        int start = uni(rng);
+        std::vector<int> frontier = {start};
+        std::vector<int> selected = {start};
+        std::vector<unsigned char> in_sel(n, 0);
+        in_sel[start] = 1;
+
+        for (size_t fi = 0; fi < frontier.size() && static_cast<int>(selected.size()) < query_size; ++fi) {
+            int u = frontier[fi];
+            auto nbrs = data_adj[u];
+            std::shuffle(nbrs.begin(), nbrs.end(), rng);
+            for (int v : nbrs) {
+                if (!in_sel[v]) {
+                    in_sel[v] = 1;
+                    selected.push_back(v);
+                    frontier.push_back(v);
+                    if (static_cast<int>(selected.size()) >= query_size) break;
+                }
+            }
+        }
+        if (static_cast<int>(selected.size()) < query_size) continue;
+
+        std::sort(selected.begin(), selected.end());
+        std::unordered_map<int,int> remap;
+        for (int i = 0; i < query_size; ++i) remap[selected[i]] = i;
+
+        Query q;
+        q.query_id = qid;
+        q.n = query_size;
+        q.labels.resize(query_size);
+        for (int i = 0; i < query_size; ++i) q.labels[i] = data_labels[selected[i]];
+
+        for (int i = 0; i < query_size; ++i) {
+            int orig_u = selected[i];
+            for (int orig_v : data_adj[orig_u]) {
+                auto it = remap.find(orig_v);
+                if (it != remap.end()) {
+                    q.edge_src.push_back(i);
+                    q.edge_dst.push_back(it->second);
+                }
+            }
+        }
+        return q;
+    }
+    throw std::runtime_error("Failed to sample connected query");
+}
+
+std::vector<Query> generate_query_stream(
+    int query_size,
+    int num_queries,
+    int seed,
+    const std::vector<std::vector<int>>& data_adj,
+    const std::vector<int>& data_labels
+) {
+    std::mt19937 rng(seed);
+    std::vector<Query> out;
+    out.reserve(num_queries);
+    for (int i = 0; i < num_queries; ++i) {
+        out.push_back(sample_connected_query(i, query_size, data_adj, data_labels, rng));
+    }
+    return out;
 }
 
 std::vector<Query> load_queries_bin(const std::string& path, int limit) {
@@ -351,8 +439,9 @@ int main(int argc, char** argv) {
     std::vector<int> data_src, data_dst, data_labels;
     load_data_graph_from_text(args, data_src, data_dst, data_labels);
 
-    auto queries = load_queries_bin(args.query_bin, args.num_queries);
-    auto query_paths = load_query_paths_bin(args.export_dir + "/demo_input/query_paths.bin");
+    auto data_adj = build_data_adj(static_cast<int>(data_labels.size()), data_src, data_dst);
+    auto queries = generate_query_stream(args.query_size, args.num_queries, args.seed, data_adj, data_labels);
+    std::unordered_map<int, std::vector<int>> query_paths;
     HostQueryBatch h_queries = build_host_query_batch(queries, query_paths);
 
     DeviceGraphCSR d_graph = upload_graph_csr(static_cast<int>(data_labels.size()), data_src, data_dst, data_labels);
