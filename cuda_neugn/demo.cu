@@ -124,37 +124,61 @@ void load_data_graph_from_text(
     std::ifstream in(path);
     if (!in) throw std::runtime_error("Failed to open graph file: " + path);
 
-    std::string tag;
-    int graph_id = 0, n_nodes = 0, n_edges = 0;
-    in >> tag >> graph_id >> n_nodes >> n_edges;
-    if (!in || tag != "t") throw std::runtime_error("Invalid .graph header: " + path);
+    std::string line;
+    if (!std::getline(in, line)) throw std::runtime_error("Empty .graph file: " + path);
+    std::stringstream hs(line);
+    char ttag = 0;
+    int n_nodes = 0, n_edges = 0;
+    hs >> ttag;
+    if (ttag != 't') throw std::runtime_error("Invalid .graph header: " + path);
+    // Support both: "t <num_nodes> <num_edges>" and "t <graph_id> <num_nodes> <num_edges>"
+    std::vector<int> hnums;
+    int x = 0;
+    while (hs >> x) hnums.push_back(x);
+    if (hnums.size() == 2) {
+        n_nodes = hnums[0];
+        n_edges = hnums[1];
+    } else if (hnums.size() == 3) {
+        n_nodes = hnums[1];
+        n_edges = hnums[2];
+    } else {
+        throw std::runtime_error("Unsupported .graph header format: " + path);
+    }
 
     data_labels.assign(n_nodes, 0);
     auto value2id = load_value2id_csv(args.config_path, args.dataset);
 
-    for (int i = 0; i < n_nodes; ++i) {
-        char vtag;
-        int nid = 0, raw_label = 0;
-        in >> vtag >> nid >> raw_label;
-        if (!in || vtag != 'v') throw std::runtime_error("Invalid vertex row in .graph: " + path);
-        auto it = value2id.find(raw_label);
-        if (it == value2id.end()) throw std::runtime_error("Missing label in value2id mapping: " + std::to_string(raw_label));
-        if (nid < 0 || nid >= n_nodes) throw std::runtime_error("Node id out of range in .graph");
-        data_labels[nid] = it->second;
+    int v_read = 0;
+    int e_read = 0;
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        char tag = 0;
+        ss >> tag;
+        if (tag == 'v') {
+            int nid = 0;
+            int raw_label = 0;
+            ss >> nid >> raw_label;
+            if (!ss) throw std::runtime_error("Invalid vertex row in .graph: " + path);
+            auto it = value2id.find(raw_label);
+            if (it == value2id.end()) throw std::runtime_error("Missing label in value2id mapping: " + std::to_string(raw_label));
+            if (nid < 0 || nid >= n_nodes) throw std::runtime_error("Node id out of range in .graph");
+            data_labels[nid] = it->second;
+            ++v_read;
+        } else if (tag == 'e') {
+            int s = 0, d = 0;
+            ss >> s >> d;
+            if (!ss) throw std::runtime_error("Invalid edge row in .graph: " + path);
+            data_src.push_back(s);
+            data_dst.push_back(d);
+            data_src.push_back(d);
+            data_dst.push_back(s);
+            ++e_read;
+        }
     }
 
-    data_src.reserve(n_edges * 2);
-    data_dst.reserve(n_edges * 2);
-    for (int i = 0; i < n_edges; ++i) {
-        char etag;
-        int s = 0, d = 0;
-        in >> etag >> s >> d;
-        if (!in || etag != 'e') throw std::runtime_error("Invalid edge row in .graph: " + path);
-        data_src.push_back(s);
-        data_dst.push_back(d);
-        data_src.push_back(d);
-        data_dst.push_back(s);
-    }
+    if (v_read != n_nodes) throw std::runtime_error("Vertex count mismatch when reading .graph");
+    if (e_read != n_edges) throw std::runtime_error("Edge count mismatch when reading .graph");
 }
 
 std::vector<int> read_i32_bin(const std::string& path) {
