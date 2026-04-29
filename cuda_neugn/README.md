@@ -38,3 +38,13 @@ Run the C++/CUDA demo flow (similar purpose to `method/demo.py` for parity/timin
 Current forward implementation status:
 - CUDA path now includes GCN encoder + llama decoder stack for batch_size=1 inference.
 - Implementation uses naive custom CUDA kernels (no cuBLAS/cuDNN) and should be treated as functional reference, not optimized runtime.
+
+## Fused GPU matcher (demo_cu)
+
+`demo_cu` now runs filter-order-join on GPU with a fused DFSJoin+NeuGN kernel path.
+
+Current limitations:
+- batch query stream is supported, with one CUDA block per query.
+- recommended query_size is <= 32.
+- only GCN encoder + LLaMA decoder + fp32 export is supported.
+- NeuGN only reorders local candidates and does not prune candidates.
