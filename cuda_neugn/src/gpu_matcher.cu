@@ -183,7 +183,7 @@ __device__ int dfs_join(
                 cnt = MAX_LOCAL_CANDIDATES;
                 out->device_error_code = 2002;
             }
-            out->max_local_candidates = std::max(out->max_local_candidates, cnt);
+            out->max_local_candidates = (out->max_local_candidates > cnt) ? out->max_local_candidates : cnt;
             int base = idx * c.max_candidates_per_qnode;
             for (int i = 0; i < cnt; ++i) local_cands[depth][i] = c.cand_nodes[base + i];
             local_cnt[depth] = cnt;

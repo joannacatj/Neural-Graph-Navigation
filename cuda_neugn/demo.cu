@@ -95,6 +95,68 @@ DemoArgs parse_args(int argc, char** argv) {
     return args;
 }
 
+
+std::unordered_map<int,int> load_value2id_csv(const std::string& config_path, const std::string& dataset) {
+    std::string path = config_path + "/" + dataset + "_value2id_mapping.csv";
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("Failed to open value2id csv: " + path);
+    std::unordered_map<int,int> out;
+    std::string line;
+    std::getline(in, line); // header
+    while (std::getline(in, line)) {
+        if (line.empty()) continue;
+        auto c = line.find(',');
+        if (c == std::string::npos) continue;
+        int val = std::stoi(line.substr(0, c));
+        int id = std::stoi(line.substr(c + 1));
+        out[val] = id;
+    }
+    return out;
+}
+
+void load_data_graph_from_text(
+    const DemoArgs& args,
+    std::vector<int>& data_src,
+    std::vector<int>& data_dst,
+    std::vector<int>& data_labels
+) {
+    const std::string path = args.graph_path + "/" + args.dataset + ".graph";
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("Failed to open graph file: " + path);
+
+    std::string tag;
+    int graph_id = 0, n_nodes = 0, n_edges = 0;
+    in >> tag >> graph_id >> n_nodes >> n_edges;
+    if (!in || tag != "t") throw std::runtime_error("Invalid .graph header: " + path);
+
+    data_labels.assign(n_nodes, 0);
+    auto value2id = load_value2id_csv(args.config_path, args.dataset);
+
+    for (int i = 0; i < n_nodes; ++i) {
+        char vtag;
+        int nid = 0, raw_label = 0;
+        in >> vtag >> nid >> raw_label;
+        if (!in || vtag != 'v') throw std::runtime_error("Invalid vertex row in .graph: " + path);
+        auto it = value2id.find(raw_label);
+        if (it == value2id.end()) throw std::runtime_error("Missing label in value2id mapping: " + std::to_string(raw_label));
+        if (nid < 0 || nid >= n_nodes) throw std::runtime_error("Node id out of range in .graph");
+        data_labels[nid] = it->second;
+    }
+
+    data_src.reserve(n_edges * 2);
+    data_dst.reserve(n_edges * 2);
+    for (int i = 0; i < n_edges; ++i) {
+        char etag;
+        int s = 0, d = 0;
+        in >> etag >> s >> d;
+        if (!in || etag != 'e') throw std::runtime_error("Invalid edge row in .graph: " + path);
+        data_src.push_back(s);
+        data_dst.push_back(d);
+        data_src.push_back(d);
+        data_dst.push_back(s);
+    }
+}
+
 std::vector<int> read_i32_bin(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("Failed to open int32 binary: " + path);
@@ -262,14 +324,8 @@ int main(int argc, char** argv) {
     DemoArgs args = parse_args(argc, argv);
     cuda_check(cudaSetDevice(args.device_id), "cudaSetDevice");
 
-    std::vector<int> raw_edges = read_i32_bin(args.export_dir + "/demo_input/data_edges_i32.bin");
-    if (raw_edges.size() % 2 != 0) throw std::runtime_error("data_edges_i32.bin must contain pairs");
-    std::vector<int> data_src(raw_edges.size() / 2), data_dst(raw_edges.size() / 2);
-    for (size_t i = 0; i < raw_edges.size(); i += 2) {
-        data_src[i / 2] = raw_edges[i];
-        data_dst[i / 2] = raw_edges[i + 1];
-    }
-    std::vector<int> data_labels = read_i32_bin(args.export_dir + "/demo_input/data_labels_i32.bin");
+    std::vector<int> data_src, data_dst, data_labels;
+    load_data_graph_from_text(args, data_src, data_dst, data_labels);
 
     auto queries = load_queries_bin(args.query_bin, args.num_queries);
     auto query_paths = load_query_paths_bin(args.export_dir + "/demo_input/query_paths.bin");
